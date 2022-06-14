@@ -96,7 +96,7 @@ void scalarProjectionCIC_project(Particles<part,part_info,part_dataType> * parts
     double rescalPosDown[3];
     double latresolution = parts->res();
 
-    double mass;
+    double mass = 0; //Sebastian
     double cicVol;
     cicVol= latresolution*latresolution*latresolution;
     cicVol *= cicVol;
