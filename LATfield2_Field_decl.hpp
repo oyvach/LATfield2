@@ -1676,16 +1676,16 @@ void  Field<FieldType>::saveHDF5_coarseGrain3D(string filename, string dataset_n
     Field<FieldType> sfield;
 
     int dim =lattice_->dim();
-    long localsize[dim];
+    std::unique_ptr<long[]> localsize{new long[dim]};
 
-    int sSize[dim];
-    int slocalsize[dim];
+    std::unique_ptr<int[]> sSize{new int[dim]};
+    std::unique_ptr<int[]> slocalsize{new int[dim]};
 
     long blocksize = array_size_*components_;
     long halo = lattice_->halo();
 
     int number_cg = ratio*ratio*ratio;
-    long index_cg[number_cg];
+    std::unique_ptr<long[]> index_cg{new long[number_cg]};
 
     long index;
     long sindex;
@@ -1715,7 +1715,7 @@ void  Field<FieldType>::saveHDF5_coarseGrain3D(string filename, string dataset_n
             }
         }
     }
-    slat.initialize(dim,sSize,0);
+    slat.initialize(dim,sSize.get(),0);
     sfield.initialize(slat,rows_,cols_,symmetry_);
     sfield.alloc();
 
