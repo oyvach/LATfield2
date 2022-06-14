@@ -751,7 +751,7 @@ Real Particles<part,part_info,part_dataType>::updateVel(Real (*updateVel_funct)(
 
     typename std::forward_list<part>::iterator it;
     double frac[3];
-    Real x0;
+    //Real x0; Sebastian
     Real maxvel = 0.;
     Real v2;
 
@@ -1824,7 +1824,7 @@ void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(
 
     //part * pTemp;
 
-    long p;
+    //long p; Sebastian
     long bufferSize[6];
     long bufferSizeRec[6];
 
@@ -2792,11 +2792,11 @@ void Particles<part,part_info,part_dataType>::saveHDF5(string filename_base, int
 
 
     int numProcPerFile = parallel.size()/fileNumber;
-    int numProcPerFileDim1 = parallel.grid_size()[1]/fileNumber;
+    //int numProcPerFileDim1 = parallel.grid_size()[1]/fileNumber; Sebastian
     int whichFile  = parallel.grid_rank()[1] * fileNumber / parallel.grid_size()[1];
     //int rankInFile;
-    long numParts[numProcPerFile];
-    int ranksList[numProcPerFile];
+    //long numParts[numProcPerFile]; Sebastian
+    //int ranksList[numProcPerFile]; Sebastian
     MPI_Comm fileComm;
     MPI_Group fileGroup;
     part * partlist;

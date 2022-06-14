@@ -23,7 +23,7 @@ Real updateVel_simple(double dtau,
                           int noutputs)
 {
 
-    double v2;
+    double v2 = 0; //Sebastian
 
     
     for(int i=0;i<3;i++)

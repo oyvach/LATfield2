@@ -237,7 +237,7 @@ void Lattice::initializeRealFFT(Lattice & lat_real, int halo)
 		parallel.abortForce();
 	}
 	
-	if(lat_real.size(0)!=lat_real.size(1) | lat_real.size(2)!=lat_real.size(1))
+	if(lat_real.size(0)!=lat_real.size(1) || lat_real.size(2)!=lat_real.size(1)) //Sebastian bit wise or -> logical or
 	{
 		if(parallel.isRoot())
 		{
@@ -272,7 +272,7 @@ void Lattice::initializeComplexFFT(Lattice & lat_real, int halo)
 		parallel.abortForce();
 	}
 	
-	if(lat_real.size(0)!=lat_real.size(1) | lat_real.size(2)!=lat_real.size(1))
+	if(lat_real.size(0)!=lat_real.size(1) || lat_real.size(2)!=lat_real.size(1)) //Sebastian bitwise or -> logical or
 	{
 		if(parallel.isRoot())
 		{
