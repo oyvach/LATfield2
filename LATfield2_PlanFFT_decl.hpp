@@ -778,7 +778,7 @@ void PlanFFT<compType>::initialize(Field<double>*  rfield,Field<compType>*   kfi
 
   //COUT << rSize_[0] << "   "<< rSize_[1]<< "   "<< rSize_[2] <<endl;
 
-  if(rSize_[0]!=rSize_[1] | rSize_[1]!=rSize_[2])
+  if(rSize_[0]!=rSize_[1] || rSize_[1]!=rSize_[2]) //Sebastian bitwise or -> logical or
   {
     if(parallel.isRoot())
     {
@@ -848,9 +848,9 @@ void PlanFFT<compType>::execute(int fft_type)
 
     if(fft_type == FFT_FORWARD)
     {
-      int i,j,k;
+      int i;//,j,k; Sebastian
       int comp;
-      int comm_rank;
+      //int comm_rank; Sebastian
 
 #ifdef SINGLE
       float *p_in;
@@ -941,8 +941,8 @@ void PlanFFT<compType>::execute(int fft_type)
     }
     if(fft_type == FFT_BACKWARD)
     {
-      int i,j,k,comp;
-      int comm_rank;
+      int i,comp; //,j,k; Sebastian
+      //int comm_rank; Sebastian
 
 #ifdef SINGLE
       float *p_out;
@@ -1053,9 +1053,9 @@ void PlanFFT<compType>::execute(int fft_type)
     		if(fft_type == FFT_FORWARD)
   			{
 
-  			   int i,j,k;
+  			   int i; //,j,k; Sebastian
   				 int comp;
-  				 int comm_rank;
+  				 //int comm_rank; Sebastian
 
   #ifdef SINGLE
   				 fftwf_complex *p_in;
@@ -1120,9 +1120,9 @@ void PlanFFT<compType>::execute(int fft_type)
   			if(fft_type == FFT_BACKWARD)
   			{
 
-  			   int i,j,k;
+  			   int i;//,j,k; Sebastian
   				 int comp;
-  				 int comm_rank;
+  				 //int comm_rank; Sebastian
 
   #ifdef SINGLE
   				 fftwf_complex *p_in;
