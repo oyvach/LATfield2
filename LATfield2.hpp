@@ -16,6 +16,7 @@
 #include <typeinfo>
 #include <list>
 #include <forward_list>
+#include <memory> // use std::unique_ptr
 
 
 #ifdef FFT3D

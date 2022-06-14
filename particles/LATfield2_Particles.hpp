@@ -2797,6 +2797,7 @@ void Particles<part,part_info,part_dataType>::saveHDF5(string filename_base, int
     //int rankInFile;
     //long numParts[numProcPerFile]; Sebastian
     //int ranksList[numProcPerFile]; Sebastian
+    
     MPI_Comm fileComm;
     MPI_Group fileGroup;
     part * partlist;
@@ -2844,17 +2845,17 @@ void Particles<part,part_info,part_dataType>::saveHDF5(string filename_base, int
     fd.localBoxOffset[2] = lat_resolution_ * (Real)(lat_part_.coordSkip()[0]);
 
 
-    Real fileBoxSize[fileNumber];
+    std::unique_ptr<Real[]> fileBoxSize{new Real[fileNumber]};
     for(int i=0;i<fileNumber;i++)fileBoxSize[i]=0;
     fileBoxSize[whichFile]=fd.localBoxSize[1];
-    parallel.sum_dim1(fileBoxSize,fileNumber);
+    parallel.sum_dim1(fileBoxSize.get(),fileNumber);
 
 
 
-    Real fileBoxOffset[fileNumber];
+    std::unique_ptr<Real[]> fileBoxOffset{new Real[fileNumber]};
     for(int i=0;i<fileNumber;i++)fileBoxOffset[i]=boxSize_[1]+1.;
     fileBoxOffset[whichFile]=fd.localBoxOffset[1];
-    parallel.min_dim1(fileBoxOffset,fileNumber);
+    parallel.min_dim1(fileBoxOffset.get(),fileNumber);
 
     fd.fileBoxSize = fileBoxSize[whichFile];
     fd.fileBoxOffset = fileBoxOffset[whichFile];
@@ -2884,7 +2885,7 @@ template <typename part, typename part_info, typename part_dataType>
 void Particles<part,part_info,part_dataType>::loadHDF5(string filename_base, int fileNumber)
 {
     //get_fd_global.
-    struct fileDsc fd[fileNumber];
+    std::unique_ptr<fileDsc[]> fd{new fileDsc[fileNumber]};
 
     part * partList;
     long partList_size,partList_offset;

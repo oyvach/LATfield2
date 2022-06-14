@@ -408,7 +408,7 @@ class Field
         void get_h5type();
 #endif
     public:
-        FieldType* data_;
+        FieldType* data_{nullptr};
 	protected:
 		//MEMBER DATA
 		Lattice*   lattice_;
@@ -425,7 +425,7 @@ class Field
 		static int initialized;
 		static int allocated;
 
-    unsigned long long data_memSize_;
+    unsigned long long data_memSize_{0};
 #ifdef HDF5
         hid_t type_id_;
         int array_size_;
@@ -446,7 +446,7 @@ int Field<FieldType>::allocated = 2;          //Status flag for allocated memory
 //CONSTRUCTORS=================
 
 template <class FieldType>
-Field<FieldType>::Field() : data_memSize_(0), data_(NULL) {
+Field<FieldType>::Field() {
     status_=0;
 #ifdef HDF5
     this->get_h5type();
@@ -454,7 +454,7 @@ Field<FieldType>::Field() : data_memSize_(0), data_(NULL) {
 }
 
 template <class FieldType>
-Field<FieldType>::Field(Lattice& lattice, int components) : data_memSize_(0), data_(NULL)
+Field<FieldType>::Field(Lattice& lattice, int components)
 {
 	status_=0;
 	this->initialize(lattice, components);
@@ -466,7 +466,7 @@ Field<FieldType>::Field(Lattice& lattice, int components) : data_memSize_(0), da
 }
 
 template <class FieldType>
-Field<FieldType>::Field(Lattice& lattice, int rows, int cols, int symmetry) : data_memSize_(0), data_(NULL)
+Field<FieldType>::Field(Lattice& lattice, int rows, int cols, int symmetry)
 {
 	status_=0;
 	this->initialize(lattice, rows, cols, symmetry);
@@ -478,7 +478,7 @@ Field<FieldType>::Field(Lattice& lattice, int rows, int cols, int symmetry) : da
 }
 
 template <class FieldType>
-Field<FieldType>::Field(Lattice& lattice, int nMatrix, int rows, int cols, int symmetry) : data_memSize_(0), data_(NULL)
+Field<FieldType>::Field(Lattice& lattice, int nMatrix, int rows, int cols, int symmetry)
 {
     status_=0;
     this->initialize(lattice,nMatrix, rows, cols, symmetry);
@@ -702,7 +702,7 @@ void Field<FieldType>::alloc()
 		data_= new FieldType[data_memSize_];
 		status_ = status_ | allocated;
 
-        if(data_==NULL)
+        if(data_==nullptr)
         {
             cout<<"LATField2d::Field::alloc(long size)  :process "<< parallel.rank() <<" cannot allocate the field data array."<<endl;
             data_memSize_ = 0;
@@ -727,7 +727,7 @@ void Field<FieldType>::alloc(long size)
 		data_= new FieldType[data_memSize_];
 		status_ = status_ | allocated;
 
-        if(data_==NULL)
+        if(data_==nullptr)
         {
             cout<<"LATField2d::Field::alloc(long size)  :process "<< parallel.rank() <<" cannot allocate the field data array."<<endl;
             data_memSize_ = 0;
@@ -1676,16 +1676,16 @@ void  Field<FieldType>::saveHDF5_coarseGrain3D(string filename, string dataset_n
     Field<FieldType> sfield;
 
     int dim =lattice_->dim();
-    long localsize[dim];
+    std::unique_ptr<long[]> localsize{new long[dim]};
 
-    int sSize[dim];
-    int slocalsize[dim];
+    std::unique_ptr<int[]> sSize{new int[dim]};
+    std::unique_ptr<int[]> slocalsize{new int[dim]};
 
     long blocksize = array_size_*components_;
     long halo = lattice_->halo();
 
     int number_cg = ratio*ratio*ratio;
-    long index_cg[number_cg];
+    std::unique_ptr<long[]> index_cg{new long[number_cg]};
 
     long index;
     long sindex;
@@ -1715,7 +1715,7 @@ void  Field<FieldType>::saveHDF5_coarseGrain3D(string filename, string dataset_n
             }
         }
     }
-    slat.initialize(dim,sSize,0);
+    slat.initialize(dim,sSize.get(),0);
     sfield.initialize(slat,rows_,cols_,symmetry_);
     sfield.alloc();
 
