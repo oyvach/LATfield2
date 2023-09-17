@@ -629,12 +629,12 @@ Real Particles<part,part_info,part_dataType>::updateVel(Real (*updateVel_funct)(
       }
       else if(reduce_type[i] & (MIN | MIN_LOCAL))
       {
-          output[i]=9223372036854775807;
+          output[i]= (double) 9223372036854775807;
           //COUT<<"min"<<endl;
       }
       else if(reduce_type[i] & (MAX | MAX_LOCAL))
       {
-          output[i]=-9223372036854775807;
+          output[i]= (double) -9223372036854775807;
           //COUT<<"max"<<endl;
       }
   }
@@ -772,12 +772,12 @@ Real Particles<part,part_info,part_dataType>::updateVel(Real (*updateVel_funct)(
         }
         else if(reduce_type[i] & (MIN | MIN_LOCAL))
         {
-            output[i]=9223372036854775807;
+            output[i]=(double) 9223372036854775807;
             //COUT<<"min"<<endl;
         }
         else if(reduce_type[i] & (MAX | MAX_LOCAL))
         {
-            output[i]=-9223372036854775807;
+            output[i]=(double) -9223372036854775807;
             //COUT<<"max"<<endl;
         }
     }
@@ -942,12 +942,12 @@ void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(
           }
           else if(reduce_type[i] & (MIN | MIN_LOCAL))
           {
-              output[i]=MAX_NUMBER;
+              output[i]=(double) MAX_NUMBER;
               //COUT<<"min"<<endl;
           }
           else if(reduce_type[i] & (MAX | MAX_LOCAL))
           {
-              output[i]=-MAX_NUMBER;
+              output[i]=-(double) MAX_NUMBER;
               //COUT<<"max"<<endl;
           }
       }
@@ -1856,12 +1856,12 @@ void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(
         }
         else if(reduce_type[i] & (MIN | MIN_LOCAL))
         {
-            output[i]=MAX_NUMBER;
+            output[i]=(double) MAX_NUMBER;
             //COUT<<"min"<<endl;
         }
         else if(reduce_type[i] & (MAX | MAX_LOCAL))
         {
-            output[i]=-MAX_NUMBER;
+            output[i]=-(double) MAX_NUMBER;
             //COUT<<"max"<<endl;
         }
     }
