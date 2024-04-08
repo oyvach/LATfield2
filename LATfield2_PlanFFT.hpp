@@ -95,6 +95,7 @@ int temporaryMemFFT::setTemp(long size)
 #endif
 //////////////////////Temp memory///////////////////////////
 
+temporaryMemFFT tempMemoryC;
 temporaryMemFFT tempMemory;
 
 

@@ -66,6 +66,7 @@ extern  const int FFT_OUT_OF_PLACE;
 
 
 extern  temporaryMemFFT tempMemory;
+extern  temporaryMemFFT tempMemoryC;
 
 /*! \class PlanFFT
 
@@ -288,23 +289,23 @@ bool PlanFFT<compType>::C2C=true;
 template<class compType>
 PlanFFT<compType>::~PlanFFT() {
 #ifndef SINGLE
-  //if (fPlan_i_ != NULLFFTWPLAN) { fftw_destroy_plan(fPlan_i_); }
-  //if (fPlan_j_ != NULLFFTWPLAN) { fftw_destroy_plan(fPlan_j_); }
-  //if (fPlan_k_ != NULLFFTWPLAN) { fftw_destroy_plan(fPlan_k_); }
-  //if (fPlan_k_real_ != NULLFFTWPLAN) { fftw_destroy_plan(fPlan_k_real_); }
-  //if (bPlan_k_ != NULLFFTWPLAN) { fftw_destroy_plan(bPlan_k_); }
-  //if (bPlan_j_ != NULLFFTWPLAN) { fftw_destroy_plan(bPlan_j_); }
-  //if (bPlan_j_real_ != NULLFFTWPLAN) { fftw_destroy_plan(bPlan_j_real_); }
-  //if (bPlan_i_ != NULLFFTWPLAN) { fftw_destroy_plan(bPlan_i_); }
+  // if (fPlan_i_ != NULLFFTWPLAN) { fftw_destroy_plan(fPlan_i_); }
+  // if (fPlan_j_ != NULLFFTWPLAN) { fftw_destroy_plan(fPlan_j_); }
+  // if (fPlan_k_ != NULLFFTWPLAN) { fftw_destroy_plan(fPlan_k_); }
+  // if (fPlan_k_real_ != NULLFFTWPLAN) { fftw_destroy_plan(fPlan_k_real_); }
+  // if (bPlan_k_ != NULLFFTWPLAN) { fftw_destroy_plan(bPlan_k_); }
+  // if (bPlan_j_ != NULLFFTWPLAN) { fftw_destroy_plan(bPlan_j_); }
+  // if (bPlan_j_real_ != NULLFFTWPLAN) { fftw_destroy_plan(bPlan_j_real_); }
+  // if (bPlan_i_ != NULLFFTWPLAN) { fftw_destroy_plan(bPlan_i_); }
 #else
-  //if (fPlan_i_ != NULLFFTWPLAN) { fftwf_destroy_plan(fPlan_i_); }
-  //if (fPlan_j_ != NULLFFTWPLAN) { fftwf_destroy_plan(fPlan_j_); }
-  //if (fPlan_k_ != NULLFFTWPLAN) { fftwf_destroy_plan(fPlan_k_); }
-  //if (fPlan_k_real_ != NULLFFTWPLAN) { fftwf_destroy_plan(fPlan_k_real_); }
-  //if (bPlan_k_ != NULLFFTWPLAN) { fftwf_destroy_plan(bPlan_k_); }
-  //if (bPlan_j_ != NULLFFTWPLAN) { fftwf_destroy_plan(bPlan_j_); }
-  //if (bPlan_j_real_ != NULLFFTWPLAN) { fftwf_destroy_plan(bPlan_j_real_); }
-  //if (bPlan_i_ != NULLFFTWPLAN) { fftwf_destroy_plan(bPlan_i_); }
+  // if (fPlan_i_ != NULLFFTWPLAN) { fftwf_destroy_plan(fPlan_i_); }
+  // if (fPlan_j_ != NULLFFTWPLAN) { fftwf_destroy_plan(fPlan_j_); }
+  // if (fPlan_k_ != NULLFFTWPLAN) { fftwf_destroy_plan(fPlan_k_); }
+  // if (fPlan_k_real_ != NULLFFTWPLAN) { fftwf_destroy_plan(fPlan_k_real_); }
+  // if (bPlan_k_ != NULLFFTWPLAN) { fftwf_destroy_plan(bPlan_k_); }
+  // if (bPlan_j_ != NULLFFTWPLAN) { fftwf_destroy_plan(bPlan_j_); }
+  // if (bPlan_j_real_ != NULLFFTWPLAN) { fftwf_destroy_plan(bPlan_j_real_); }
+  // if (bPlan_i_ != NULLFFTWPLAN) { fftwf_destroy_plan(bPlan_i_); }
 #endif
 
 
@@ -373,10 +374,10 @@ void PlanFFT<compType>::initialize(Field<compType>*  rfield,Field<compType>*  kf
   kHalo_ = kfield->lattice().halo();
 
   /////from latfield2d_IO
-  tempMemory.setTemp((long)(rSize_[0]+2)  * (long)(rSizeLocal_[1]+2) * (long)(rSizeLocal_[2]+2));
+  tempMemoryC.setTemp((long)(rSize_[0]*2+2)  * (long)(rSizeLocal_[1]+2) * (long)(rSizeLocal_[2]+2));
 
-  	temp_  = tempMemory.temp1();
-  	temp1_ = tempMemory.temp2();
+  	temp_  = tempMemoryC.temp1();
+  	temp1_ = tempMemoryC.temp2();
 
   	if(rfield->lattice().dim()!=3)
   	{
@@ -632,10 +633,10 @@ void PlanFFT<compType>::initialize(Field<compType>*  rfield,Field<compType>*  kf
   kHalo_ = kfield->lattice().halo();
 
   /////from latfield2d_IO
-  tempMemory.setTemp((long)(rSize_[0]+10)  * (long)(rSizeLocal_[1]+10) * (long)(rSizeLocal_[2]+10));
+  tempMemoryC.setTemp((long)(rSize_[0]*2+10)  * (long)(rSizeLocal_[1]+10) * (long)(rSizeLocal_[2]+10));
 
-  	temp_  = tempMemory.temp1();
-  	temp1_ = tempMemory.temp2();
+  	temp_  = tempMemoryC.temp1();
+  	temp1_ = tempMemoryC.temp2();
 
   	if(rfield->lattice().dim()!=3)
   	{
