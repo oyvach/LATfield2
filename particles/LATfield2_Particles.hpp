@@ -2111,6 +2111,7 @@ void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(
                         cout<< "particle position: "<< (*it) <<endl;
                         //cout<< "particle position old: "<< partTest <<endl;
                         cout<<"particle : "<<(*it).ID<< " "<< thisRanks[0]<<" , "<< thisRanks[1]<<" , "<< partRanks[0]<<" , "<< partRanks[1]<<endl;
+                        throw 1;
                     }
                     field_part_(x).parts.erase_after(prev);
                     it = prev;
@@ -2121,6 +2122,7 @@ void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(
                     cout<< "particle position: "<< (*it) <<endl;
                     //cout<< "particle position old: "<< partTest <<endl;
                     cout<<"particle : "<<(*it).ID<< " "<< thisRanks[0]<<" , "<< thisRanks[1]<<" , "<< partRanks[0]<<" , "<< partRanks[1]<<endl;
+                    throw 1;
                 }
 
             }
