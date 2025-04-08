@@ -347,7 +347,7 @@ void PlanFFT<compType>::initialize(Field<compType>*  rfield,Field<compType>*  kf
 
   //general variable
 
-  COUT<<"INITIALIZING COMPLEX FFT"<<endl;
+  // COUT<<"INITIALIZING COMPLEX FFT"<<endl;
 
   if(rfield->components() != kfield->components())
   {
