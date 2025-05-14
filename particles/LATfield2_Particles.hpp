@@ -182,6 +182,9 @@ public:
      */
   bool addParticle_global(part newPart);
 
+  bool addParticle_global(part newPart, bool assignID);
+
+
   void prepare_RK();
 
 
@@ -508,6 +511,27 @@ bool Particles<part,part_info,part_dataType>::addParticle_global(part newPart)
       field_part_(x).parts.push_front(newPart);
       numParticles_ +=1;
       return true;
+    }
+  else
+    {
+      return false;
+    }
+} // modded version that assigns ID (to reduce read time)
+template <typename part, typename part_info, typename part_dataType>
+bool Particles<part,part_info,part_dataType>::addParticle_global(part newPart,bool assignID)
+{
+  Site x(lat_part_);
+  int coord[3];
+
+  this->getPartCoord(newPart,coord);
+
+  if(x.setCoord(coord))
+    {
+      //field_part_(x).size += 1;
+        newPart.ID = numParticles_;
+        field_part_(x).parts.push_front(newPart);
+        numParticles_ +=1;
+        return true;
     }
   else
     {

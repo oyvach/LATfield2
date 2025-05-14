@@ -31,16 +31,16 @@ temporaryMemFFT::~temporaryMemFFT()
 	if(allocated_>0)
 	{
 #ifdef SINGLE
-		//if(temp1_!=NULL)fftwf_free(temp1_);
-		//if(temp2_!=NULL)fftwf_free(temp2_);
+		if(temp1_!=NULL)fftwf_free(temp1_);
+		if(temp2_!=NULL)fftwf_free(temp2_);
 #endif
 #ifndef SINGLE
-		//if(temp1_!=NULL)fftw_free(temp1_);
-		//if(temp2_!=NULL)fftw_free(temp2_);
+		if(temp1_!=NULL)fftw_free(temp1_);
+		if(temp2_!=NULL)fftw_free(temp2_);
 #endif
-		//allocated_ = 0;
-		//temp1_=NULL;
-		//temp2_=NULL;
+		allocated_ = 0;
+		temp1_=NULL;
+		temp2_=NULL;
 	}
 
 }

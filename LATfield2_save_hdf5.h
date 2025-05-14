@@ -1,4 +1,3 @@
-
 /*! \file LATfield2_save_hdf5.h
  \brief LATfield2_save_hdf5.h contains the definition of the function used for hdf5 i/o.
  \author David Daverio
@@ -15,15 +14,17 @@ extern "C"{
    {
 
 	   hid_t file_id, plist_id,filespace,memspace,dset_id,dtype_id,dtbase_id,root_id;
-	   hsize_t * components;
+	   hsize_t * components = nullptr; // Initialize to nullptr
 
 	   char * filename;
 	   filename = (char*)malloc((filename_str.size()+1)*sizeof(char));
-     for(int i = 0;i<filename_str.size();i++)filename[i]=filename_str[i];
-     filename[filename_str.size()] = '\0';
+       //for(int i = 0;i<filename_str.size();i++)filename[i]=filename_str[i];
+	   strcpy(filename,filename_str.c_str());
+       filename[filename_str.size()] = '\0';
 
-	   char  dataset_name[128];
-	   for(int i = 0;i<filename_str.size();i++)dataset_name[i]=dataset_name_str[i];
+	   char  dataset_name[512];
+	//    for(int i = 0;i<filename_str.size();i++)dataset_name[i]=dataset_name_str[i];
+	   strcpy(dataset_name,dataset_name_str.c_str());
 	   dataset_name[dataset_name_str.size()] = '\0';
 
 	   herr_t status;
@@ -134,6 +135,13 @@ extern "C"{
 	   H5Fclose(file_id);
 	   free(filename);
 
+	   delete[] sizeGlobal;
+	   delete[] localSize;
+	   delete[] offset;
+	   delete[] offsetf;
+	   delete[] count;
+	   delete[] components;
+
 	   return 1;
 
 #else // serial version, without H5_HAVE_PARALLEL definition hdf5 will run in serial !
@@ -210,10 +218,25 @@ extern "C"{
 
 	   }
 
+	   delete[] sizeGlobal;
+	   delete[] localSize;
+	   delete[] offset;
+	   delete[] offsetf;
+	   delete[] count;
+	   delete[] components;
 	   free(filename);
 	   return 1;
 #endif
 
+	   // Cleanup in case of error or unexpected path
+	   delete[] sizeGlobal;
+	   delete[] localSize;
+	   delete[] offset;
+	   delete[] offsetf;
+	   delete[] count;
+	   delete[] components;
+	   // filename might also need freeing here if this path is reachable after its allocation
+	   // and before its usual free points. For now, focusing on the reported leaks.
 	   return -1;
 
 
@@ -230,11 +253,13 @@ extern "C"{
 
 		char * filename;
 		filename = (char*)malloc((filename_str.size()+1)*sizeof(char));
-		for(int i = 0;i<filename_str.size();i++)filename[i]=filename_str[i];
+		// for(int i = 0;i<filename_str.size();i++)filename[i]=filename_str[i];
+		strncpy(filename,filename_str.c_str(),filename_str.size());
 		filename[filename_str.size()] = '\0';
 
-		char  dataset_name[128];
-		for(int i = 0;i<filename_str.size();i++)dataset_name[i]=dataset_name_str[i];
+		char  dataset_name[512];
+		// for(int i = 0;i<filename_str.size();i++)dataset_name[i]=dataset_name_str[i];
+		strncpy(dataset_name,dataset_name_str.c_str(),dataset_name_str.size());
 		dataset_name[dataset_name_str.size()] = '\0';
 
 		herr_t status;
