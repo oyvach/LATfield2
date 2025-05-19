@@ -66,7 +66,7 @@ extern  const int FFT_OUT_OF_PLACE;
 
 
 extern  temporaryMemFFT tempMemory;
-// extern  temporaryMemFFT tempMemoryC;
+extern  temporaryMemFFT tempMemoryC;
 
 /*! \class PlanFFT
 
@@ -374,13 +374,14 @@ void PlanFFT<compType>::initialize(Field<compType>*  rfield,Field<compType>*  kf
   kHalo_ = kfield->lattice().halo();
 
   /////from latfield2d_IO
-  // tempMemoryC.setTemp((long)(rSize_[0]*2+2)  * (long)(rSizeLocal_[1]+2) * (long)(rSizeLocal_[2]+2));
-  tempMemory.setTemp((long)(rSize_[0]+2)  * (long)(rSizeLocal_[1]+2) * (long)(rSizeLocal_[2]+2));
+  // tempMemory.setTemp((long)(rSize_[0]+2)  * (long)(rSizeLocal_[1]+2) * (long)(rSizeLocal_[2]+2));
 
-  	temp_  = tempMemory.temp1();
-  	temp1_ = tempMemory.temp2();
-    // temp_  = tempMemoryC.temp1();
-  	// temp1_ = tempMemoryC.temp2();
+  // 	temp_  = tempMemory.temp1();
+  // 	temp1_ = tempMemory.temp2();
+  tempMemoryC.setTemp((long)(rSize_[0]*2+2)  * (long)(rSizeLocal_[1]+2) * (long)(rSizeLocal_[2]+2));
+  
+    temp_  = tempMemoryC.temp1();
+  	temp1_ = tempMemoryC.temp2();
 
   	if(rfield->lattice().dim()!=3)
   	{
@@ -636,14 +637,14 @@ void PlanFFT<compType>::initialize(Field<compType>*  rfield,Field<compType>*  kf
   kHalo_ = kfield->lattice().halo();
 
   /////from latfield2d_IO
-  // tempMemoryC.setTemp((long)(rSize_[0]*2+10)  * (long)(rSizeLocal_[1]+10) * (long)(rSizeLocal_[2]+10));
+  tempMemoryC.setTemp((long)(rSize_[0]*2+10)  * (long)(rSizeLocal_[1]+10) * (long)(rSizeLocal_[2]+10));
 
-  // 	temp_  = tempMemoryC.temp1();
-  // 	temp1_ = tempMemoryC.temp2();
-  tempMemory.setTemp((long)(rSize_[0]+10)  * (long)(rSizeLocal_[1]+10) * (long)(rSizeLocal_[2]+10));
+  	temp_  = tempMemoryC.temp1();
+  	temp1_ = tempMemoryC.temp2();
+  // tempMemory.setTemp((long)(rSize_[0]+10)  * (long)(rSizeLocal_[1]+10) * (long)(rSizeLocal_[2]+10));
 
-  	temp_  = tempMemory.temp1();
-  	temp1_ = tempMemory.temp2();
+  // 	temp_  = tempMemory.temp1();
+  // 	temp1_ = tempMemory.temp2();
 
   	if(rfield->lattice().dim()!=3)
   	{
