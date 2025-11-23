@@ -189,12 +189,12 @@ public:
 
 
     template<typename mappingClass>
-    Real updateVel(Real (*updateVel_funct)(double,double,part*,double *,part_info,Field<Real> **,Site *,mappingClass *,int,double*,double*,int),
+    Real updateVel(Real (*updateVel_funct)(double,double,part*,double *,part_info,Field<Real> **,Site *,mappingClass *,int,double**,double*,int),
                    double dtau,
                    Field<Real> ** fields=NULL,
                    int nfields=0,
                    mappingClass * mc = NULL,
-                   double * params=NULL,
+                   double ** params=NULL,
                    double * output=NULL,
                    int * reduce_type=NULL,
                    int noutput=0);
@@ -207,18 +207,18 @@ public:
     \param double dtau: variation of time.
     \param Field<Real> ** fields=NULL: array of pointer to field class.
     \param int nfields: size of the array fields.
-    \param double * params: pointer to an array of double, used to pass constants.
+    \param double ** params: pointer to an array of double, used to pass constants.
     \param double * output: pointer to an array of double. This array is used to return statistics over the particles properties, The outputs are constructed within the function updateVel_funct, and then reduced over every particles. The reduction can be the sum, the minimum or the maximum over all particles or over the particles stored in this given process.
     \param int * reduce_type: array with same size of the output array. This array is used to specify the reduction type which can be: SUM,MIN,MAX,SUM_LOCAL,MIN_LOCAL,MAX_LOCAL
     \param int noutput: size of the arrays output and reduce_type.
 
     */
 
-    Real updateVel(Real (*updateVel_funct)(double,double,part*,double *,part_info,Field<Real> **,Site *,int,double*,double*,int),
+    Real updateVel(Real (*updateVel_funct)(double,double,part*,double *,part_info,Field<Real> **,Site *,int,double**,double*,int),
                    double dtau,
                    Field<Real> ** fields=NULL,
                    int nfields=0,
-                   double * params=NULL,
+                   double ** params=NULL,
                    double * output=NULL,
                    int * reduce_type=NULL,
                    int noutput=0);
@@ -229,16 +229,16 @@ public:
                        Field<Real> ** fields=NULL,
                        int nfields=0,
                        mappingClass * mc = NULL,
-                       double * params=NULL,
+                       double ** params=NULL,
                        double * output=NULL,
                        int * reduce_type=NULL,
                        int noutput=0);*/
 
-    void moveParticles( void (*move_funct)(double,double,part*,double *,part_info,Field<Real> **,Site *,int,double*,double*,int),
+    void moveParticles( void (*move_funct)(double,double,part*,double *,part_info,Field<Real> **,Site *,int,double**,double*,int),
                        double dtau,
                        Field<Real> ** fields=NULL,
                        int nfields=0,
-                       double * params=NULL,
+                       double ** params=NULL,
                        double * output=NULL,
                        int * reduce_type=NULL,
                        int noutput=0);
@@ -607,12 +607,12 @@ void Particles<part,part_info,part_dataType>::prepare_RK()
 
 template <typename part, typename part_info, typename part_dataType>
 template <typename mappingClass>
-Real Particles<part,part_info,part_dataType>::updateVel(Real (*updateVel_funct)(double,double,part*,double *,part_info,Field<Real> **,Site *,mappingClass *,int,double*,double*,int),
+Real Particles<part,part_info,part_dataType>::updateVel(Real (*updateVel_funct)(double,double,part*,double *,part_info,Field<Real> **,Site *,mappingClass *,int,double**,double*,int),
                double dtau,
                Field<Real> ** fields,
                int nfields,
                mappingClass * mc,
-               double * params,
+               double ** params,
                double * output,
                int * reduce_type,
                int noutput)
@@ -750,11 +750,11 @@ Real Particles<part,part_info,part_dataType>::updateVel(Real (*updateVel_funct)(
 }
 
 template <typename part, typename part_info, typename part_dataType>
-Real Particles<part,part_info,part_dataType>::updateVel(Real (*updateVel_funct)(double,double,part*,double *,part_info,Field<Real> **,Site *,int,double*,double*,int),
+Real Particles<part,part_info,part_dataType>::updateVel(Real (*updateVel_funct)(double,double,part*,double *,part_info,Field<Real> **,Site *,int,double**,double*,int),
                double dtau,
                Field<Real> ** fields,
                int nfields,
-               double * params,
+               double ** params,
                double * output,
                int * reduce_type,
                int noutput)
@@ -899,7 +899,7 @@ void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(
                    Field<Real> ** fields,
                    int nfields,
                    mappingClass * mc,
-                   double * params,
+                   double ** params,
                    double * output,
                    int * reduce_type,
                    int noutput)
@@ -1808,11 +1808,11 @@ void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(
 }*/
 
 template <typename part, typename part_info, typename part_dataType>
-void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(double,double,part*,double *,part_info,Field<Real> **,Site *,int,double*,double*,int),
+void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(double,double,part*,double *,part_info,Field<Real> **,Site *,int,double**,double*,int),
                                                             double dtau,
                                                             Field<Real> ** fields,
                                                             int nfields,
-                                                            double * params,
+                                                            double ** params,
                                                             double * output,
                                                             int * reduce_type,
                                                             int noutput)

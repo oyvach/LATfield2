@@ -18,7 +18,7 @@ Real updateVel_simple(double dtau,
                           Field<Real> ** fields,
                           Site * sites,
                           int nfield,
-                          double * params,
+                          double ** params,
                           double * outputs,
                           int noutputs)
 {
