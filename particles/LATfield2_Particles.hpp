@@ -79,8 +79,8 @@ CREATE_MEMBER_DETECTOR_MAXI(mass)
 
 
 #define SUM             1
-#define MIN             2
-#define MAX             4
+#define LFMIN             2
+#define LFMAX            4
 #define SUM_LOCAL       8
 #define MIN_LOCAL      16
 #define MAX_LOCAL      32
@@ -651,12 +651,12 @@ Real Particles<part,part_info,part_dataType>::updateVel(Real (*updateVel_funct)(
 
           //COUT<< "sum" <<endl;
       }
-      else if(reduce_type[i] & (MIN | MIN_LOCAL))
+      else if(reduce_type[i] & (LFMIN | MIN_LOCAL))
       {
           output[i]= (double) 9223372036854775807;
           //COUT<<"min"<<endl;
       }
-      else if(reduce_type[i] & (MAX | MAX_LOCAL))
+      else if(reduce_type[i] & (LFMAX| MAX_LOCAL))
       {
           output[i]= (double) -9223372036854775807;
           //COUT<<"max"<<endl;
@@ -708,11 +708,11 @@ Real Particles<part,part_info,part_dataType>::updateVel(Real (*updateVel_funct)(
                   {
                       output[i]+=output_temp[i];
                   }
-                  else if(reduce_type[i] & (MIN | MIN_LOCAL))
+                  else if(reduce_type[i] & (LFMIN | MIN_LOCAL))
                   {
                       if(output[i]>output_temp[i])output[i]=output_temp[i];
                   }
-                  else if(reduce_type[i] & (MAX | MAX_LOCAL))
+                  else if(reduce_type[i] & (LFMAX| MAX_LOCAL))
                   {
                       if(output[i]<output_temp[i])output[i]=output_temp[i];
                   }
@@ -732,11 +732,11 @@ Real Particles<part,part_info,part_dataType>::updateVel(Real (*updateVel_funct)(
       {
           parallel.sum(output[i]);
       }
-      else if(reduce_type[i] & MIN)
+      else if(reduce_type[i] & LFMIN)
       {
           parallel.min(output[i]);
       }
-      else if(reduce_type[i] & MAX)
+      else if(reduce_type[i] & LFMAX)
       {
           parallel.max(output[i]);
       }
@@ -794,12 +794,12 @@ Real Particles<part,part_info,part_dataType>::updateVel(Real (*updateVel_funct)(
 
             //COUT<< "sum" <<endl;
         }
-        else if(reduce_type[i] & (MIN | MIN_LOCAL))
+        else if(reduce_type[i] & (LFMIN | MIN_LOCAL))
         {
             output[i]=(double) 9223372036854775807;
             //COUT<<"min"<<endl;
         }
-        else if(reduce_type[i] & (MAX | MAX_LOCAL))
+        else if(reduce_type[i] & (LFMAX| MAX_LOCAL))
         {
             output[i]=(double) -9223372036854775807;
             //COUT<<"max"<<endl;
@@ -850,11 +850,11 @@ Real Particles<part,part_info,part_dataType>::updateVel(Real (*updateVel_funct)(
                     {
                         output[i]+=output_temp[i];
                     }
-                    else if(reduce_type[i] & (MIN | MIN_LOCAL))
+                    else if(reduce_type[i] & (LFMIN | MIN_LOCAL))
                     {
                         if(output[i]>output_temp[i])output[i]=output_temp[i];
                     }
-                    else if(reduce_type[i] & (MAX | MAX_LOCAL))
+                    else if(reduce_type[i] & (LFMAX| MAX_LOCAL))
                     {
                         if(output[i]<output_temp[i])output[i]=output_temp[i];
                     }
@@ -874,11 +874,11 @@ Real Particles<part,part_info,part_dataType>::updateVel(Real (*updateVel_funct)(
         {
             parallel.sum(output[i]);
         }
-        else if(reduce_type[i] & MIN)
+        else if(reduce_type[i] & LFMIN)
         {
             parallel.min(output[i]);
         }
-        else if(reduce_type[i] & MAX)
+        else if(reduce_type[i] & LFMAX)
         {
             parallel.max(output[i]);
         }
@@ -964,12 +964,12 @@ void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(
 
               //COUT<< "sum" <<endl;
           }
-          else if(reduce_type[i] & (MIN | MIN_LOCAL))
+          else if(reduce_type[i] & (LFMIN | MIN_LOCAL))
           {
               output[i]=(double) MAX_NUMBER;
               //COUT<<"min"<<endl;
           }
-          else if(reduce_type[i] & (MAX | MAX_LOCAL))
+          else if(reduce_type[i] & (LFMAX| MAX_LOCAL))
           {
               output[i]=-(double) MAX_NUMBER;
               //COUT<<"max"<<endl;
@@ -1028,11 +1028,11 @@ void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(
                       {
                           output[i]+=output_temp[i];
                       }
-                      else if(reduce_type[i] & (MIN | MIN_LOCAL))
+                      else if(reduce_type[i] & (LFMIN | MIN_LOCAL))
                       {
                           if(output[i]>output_temp[i])output[i]=output_temp[i];
                       }
-                      else if(reduce_type[i] & (MAX | MAX_LOCAL))
+                      else if(reduce_type[i] & (LFMAX| MAX_LOCAL))
                       {
                           if(output[i]<output_temp[i])output[i]=output_temp[i];
                       }
@@ -1173,11 +1173,11 @@ void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(
           {
               parallel.sum(output[i]);
           }
-          else if(reduce_type[i] & MIN)
+          else if(reduce_type[i] & LFMIN)
           {
               parallel.min(output[i]);
           }
-          else if(reduce_type[i] & MAX)
+          else if(reduce_type[i] & LFMAX)
           {
               parallel.max(output[i]);
           }
@@ -1878,12 +1878,12 @@ void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(
 
             //COUT<< "sum" <<endl;
         }
-        else if(reduce_type[i] & (MIN | MIN_LOCAL))
+        else if(reduce_type[i] & (LFMIN | MIN_LOCAL))
         {
             output[i]=(double) MAX_NUMBER;
             //COUT<<"min"<<endl;
         }
-        else if(reduce_type[i] & (MAX | MAX_LOCAL))
+        else if(reduce_type[i] & (LFMAX| MAX_LOCAL))
         {
             output[i]=-(double) MAX_NUMBER;
             //COUT<<"max"<<endl;
@@ -1920,11 +1920,11 @@ void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(
                     {
                         output[i]+=output_temp[i];
                     }
-                    else if(reduce_type[i] & (MIN | MIN_LOCAL))
+                    else if(reduce_type[i] & (LFMIN | MIN_LOCAL))
                     {
                         if(output[i]>output_temp[i])output[i]=output_temp[i];
                     }
-                    else if(reduce_type[i] & (MAX | MAX_LOCAL))
+                    else if(reduce_type[i] & (LFMAX| MAX_LOCAL))
                     {
                         if(output[i]<output_temp[i])output[i]=output_temp[i];
                     }
@@ -1941,11 +1941,11 @@ void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(
         {
             parallel.sum(output[i]);
         }
-        else if(reduce_type[i] & MIN)
+        else if(reduce_type[i] & LFMIN)
         {
             parallel.min(output[i]);
         }
-        else if(reduce_type[i] & MAX)
+        else if(reduce_type[i] & LFMAX)
         {
             parallel.max(output[i]);
         }
@@ -2007,11 +2007,11 @@ void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(
                     {
                         output[i]+=output_temp[i];
                     }
-                    else if(reduce_type[i] & (MIN | MIN_LOCAL))
+                    else if(reduce_type[i] & (LFMIN | MIN_LOCAL))
                     {
                         if(output[i]>output_temp[i])output[i]=output_temp[i];
                     }
-                    else if(reduce_type[i] & (MAX | MAX_LOCAL))
+                    else if(reduce_type[i] & (LFMAX| MAX_LOCAL))
                     {
                         if(output[i]<output_temp[i])output[i]=output_temp[i];
                     }
