@@ -6,6 +6,7 @@
 #include <thrust/sort.h>
 #include <thrust/binary_search.h>
 #include <thrust/execution_policy.h>
+#include <cub/cub.cuh>
 
 #include <cuda/atomic>
 #include <nvtx3/nvToolsExt.h>
@@ -139,24 +140,6 @@ void row_buffer<p_type, q_type, other_type>::resize(int new_capacity)
 template <typename p_type, typename q_type, typename other_type>
 void row_buffer<p_type, q_type, other_type>::resizeManaged(int new_capacity)
 {
-    // Reallocate the arrays using cuda_reallocManaged
- /*   p_type * new_p = cuda_reallocManaged<p_type>(p, capacity * 3, new_capacity * 3);
-    q_type * new_q = cuda_reallocManaged<q_type>(q, capacity * 3, new_capacity * 3);
-    other_type * new_other = cuda_reallocManaged<other_type>(other, capacity, new_capacity);
-    auto success = cudaDeviceSynchronize();
-
-    if (success != cudaSuccess)
-    {
-        std::cerr << "CUDA memory reallocation failed: " << cudaGetErrorString(success) << std::endl;
-        throw std::runtime_error("Error in cuda_reallocManaged");
-    }
-
-    // Update the pointers
-    p = new_p;
-    q = new_q;
-    other = new_other;
-    // Update capacity
-    capacity = new_capacity;*/
     resize(new_capacity);
 }
 
@@ -165,6 +148,14 @@ class perfParticles;
 
 template <typename part, typename part_info>
 __global__ void update_pointers(perfParticles<part, part_info> * pcl, unsigned long long int * send_begin);
+
+template <typename part, typename part_info>
+__global__ void compute_rows(perfParticles<part, part_info> * pcl, uint32_t * row, unsigned long long int starting_idx = 0);
+
+__global__ void compute_row_offsets(const uint32_t * keys, unsigned long long int num_particles, unsigned long long int * offsets, uint32_t num_rows);
+
+template <typename part, typename part_info, typename T>
+__global__ void reorder_data(perfParticles<part, part_info> * pcl, unsigned long long int * indices_out, T * data_in, T * data_out, size_t stride, size_t ndata);
 
 template <typename part, typename part_info, typename UpdateFunct>
 __global__ void update_particles(perfParticles<part, part_info> * pcl, UpdateFunct update_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int * reduce_type, int noutput, Real * v2, bool copyout = true);
@@ -282,6 +273,13 @@ class perfParticles
         template <typename UpdateFunct>
         void projectParticles_Async(UpdateFunct project_funct, Field<Real> ** fields = NULL, int nfields = 0, double * params = NULL, double * output = NULL, int * reduce_type = NULL, int noutput = 0);
 
+        void sampleParticles(Real * pos, Real * vel, long * ID, size_t nsample)
+        {
+            cudaMemcpy(pos, p, nsample * 3 * sizeof(Real), cudaMemcpyDefault);
+            cudaMemcpy(vel, q, nsample * 3 * sizeof(Real), cudaMemcpyDefault);
+            cudaMemcpy(ID, other, nsample * sizeof(long), cudaMemcpyDefault);
+        }
+
     protected:
 
         // particle info structure
@@ -311,7 +309,6 @@ class perfParticles
         long * other;
         uint64_t total_capacity_;
         // extra buffer for adding and communicating particles
-        //row_buffer<Real, Real, long> add_buffer_;
         row_buffer<Real, Real, long> extra_buffer_[9];
 
         // Flag to check if rows are sorted
@@ -329,26 +326,20 @@ class perfParticles
                 throw std::runtime_error("New capacity is less than number of particles");
             }
 
-            /*total_capacity_ = new_total_capacity;
-
-            Real * new_p = (Real *) realloc(p, total_capacity_ * 3 * sizeof(Real));
-            Real * new_q = (Real *) realloc(q, total_capacity_ * 3 * sizeof(Real));
-            long * new_other = (long *) realloc(other, total_capacity_ * sizeof(long));
-
-            if (new_p == NULL || new_q == NULL || new_other == NULL)
-            {
-                throw std::runtime_error("Memory allocation failed");
-            }
-
-            p = new_p;
-            q = new_q;
-            other = new_other;*/
-
             p = cuda_realloc(p, total_capacity_ * 3, new_total_capacity * 3);
             q = cuda_realloc(q, total_capacity_ * 3, new_total_capacity * 3);
             other = cuda_realloc(other, total_capacity_, new_total_capacity);
 
             total_capacity_ = new_total_capacity;
+
+            // update device mempool release threshold
+            size_t threshold;
+            cudaMemPool_t pool;
+
+            cudaDeviceGetDefaultMemPool(&pool, 0);
+            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReleaseThreshold, &threshold);
+            threshold = std::max(threshold, size_t((num_row_buffers_ + 1) * sizeof(unsigned long long int) + total_capacity_ * (5 * sizeof(Real) + 2 * sizeof(unsigned long long int))));
+            cudaMemPoolSetAttribute(pool, cudaMemPoolAttrReleaseThreshold, &threshold);
         }
 
         void flushExtraBuffer(int idx = 4)
@@ -370,6 +361,15 @@ class perfParticles
             }
         }
 
+        // helper function to prepare communication
+        void prepareComm(unsigned long long int * send_begin, uint32_t ** d_keys, void ** d_temp, cudaStream_t & stream);
+
+        // helper function for sorting particles
+        void computeSortIndices(uint32_t * d_keys, unsigned long long int * d_indices, void ** d_temp, cudaStream_t & stream);
+
+        // helper function to reorder particles
+        void reorderParticles(unsigned long long int * d_indices, void * d_temp, cudaStream_t & stream);
+
         // helper function for particle-mesh projection
         __device__ void project_particle(Real * target, int projection_order, long start_idx, const long * jump, int row, int stencil_k, int idx);
 
@@ -384,6 +384,12 @@ class perfParticles
 
         template <typename part2, typename part_info2>
         friend __global__ void update_pointers(perfParticles<part2, part_info2> * pcl, unsigned long long int * send_begin);
+
+        template <typename part2, typename part_info2>
+        friend __global__ void compute_rows(perfParticles<part2, part_info2> * pcl, uint32_t * row, unsigned long long int starting_idx);
+
+        template <typename part2, typename part_info2, typename T>
+        friend __global__ void reorder_data(perfParticles<part2, part_info2> * pcl, unsigned long long int * indices_out, T * data_in, T * data_out, size_t stride, size_t ndata);
 
         template <typename part2, typename part_info2, typename UpdateFunct>
         friend __global__ void update_particles(perfParticles<part2, part_info2> * pcl, UpdateFunct update_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int * reduce_type, int noutput, Real * v2, bool copyout);
@@ -406,11 +412,7 @@ perfParticles<part, part_info>::perfParticles()
     q = nullptr;
     other = nullptr;
     total_capacity_ = 0;
-    /*add_buffer_.p = nullptr;
-    add_buffer_.q = nullptr;
-    add_buffer_.other = nullptr;
-    add_buffer_.count = 0;
-    add_buffer_.capacity = 0;*/
+    // Initialize the extra buffers
     for (int i = 0; i < 9; i++)
     {
         extra_buffer_[i].p = nullptr;
@@ -428,24 +430,14 @@ perfParticles<part, part_info>::~perfParticles()
     // Free the row buffers
     if (row_buffers_ != nullptr)
     {
-        /*free(row_buffers_);
-        free(p);
-        free(q);
-        free(other);*/
         cudaFree(row_buffers_);
         cudaFree(p);
         cudaFree(q);
         cudaFree(other);
     }
-
-    /*cudaFree(add_buffer_.p);
-    cudaFree(add_buffer_.q);
-    cudaFree(add_buffer_.other);*/
+    // Free the extra buffers
     for (int i = 0; i < 9; i++)
     {
-        //cudaFree(extra_buffer_[i].p);
-        //cudaFree(extra_buffer_[i].q);
-        //cudaFree(extra_buffer_[i].other);
         free(extra_buffer_[i].p);
         free(extra_buffer_[i].q);
         free(extra_buffer_[i].other);
@@ -482,7 +474,6 @@ void perfParticles<part, part_info>::initialize(part_info part_global_info, Latt
     num_row_buffers_ = lat_size_local_[1] * lat_size_local_[2];
 
     // Allocate the row buffers
-    //row_buffers_ = (row_buffer<Real, Real, long> *)malloc(num_row_buffers_ * sizeof(row_buffer<Real, Real, long>));
     auto success = cudaMalloc(&row_buffers_, num_row_buffers_ * sizeof(row_buffer<Real, Real, long>));
     // Check if the allocation was successful
     if (success != cudaSuccess || row_buffers_ == nullptr)
@@ -492,7 +483,6 @@ void perfParticles<part, part_info>::initialize(part_info part_global_info, Latt
         throw std::runtime_error("Memory allocation failed for row_buffers_ in perfParticles::initialize");
     }
     // Initialize the row buffers
-    //for (uint32_t i = 0; i < num_row_buffers_; i++)
     thrust::for_each(thrust::device, row_buffers_, row_buffers_ + num_row_buffers_, [] __device__ (row_buffer<Real, Real, long> & rb)
     {
         rb.p = nullptr;
@@ -505,9 +495,7 @@ void perfParticles<part, part_info>::initialize(part_info part_global_info, Latt
 
     // allocate global arrays
     total_capacity_ = initial_capacity;
-    //p = (Real *)malloc(total_capacity_ * 3 * sizeof(Real));
-    //q = (Real *)malloc(total_capacity_ * 3 * sizeof(Real));
-    //other = (long *)malloc(total_capacity_ * sizeof(long));
+
     success = cudaMalloc(&p, total_capacity_ * 3 * sizeof(Real)); // this should be on device
 
     if (success != cudaSuccess)
@@ -549,37 +537,22 @@ void perfParticles<part, part_info>::initialize(part_info part_global_info, Latt
         {
             extra_buffer_[i].capacity = extra_capacity_ / 4;
         }
-        //extra_buffer_[i].capacity = ((i == 4 || i % 2) ? extra_capacity_ : (extra_capacity_)); // corners need less capacity
+        
         extra_buffer_[i].sorted = true;
 
         extra_buffer_[i].p = (Real *) malloc(extra_buffer_[i].capacity * 3 * sizeof(Real));
         extra_buffer_[i].q = (Real *) malloc(extra_buffer_[i].capacity * 3 * sizeof(Real));
         extra_buffer_[i].other = (long *) malloc(extra_buffer_[i].capacity * sizeof(long));
-
-        /*success = cudaMallocManaged(&extra_buffer_[i].p, extra_buffer_[i].capacity * 3 * sizeof(Real));
-
-        if (success != cudaSuccess)
-        {
-            std::cerr << "cudaMallocManaged failed: " << cudaGetErrorString(success) << std::endl;
-            throw std::runtime_error("Memory allocation failed in perfParticles::initialize");
-        }
-
-        success = cudaMallocManaged(&extra_buffer_[i].q, extra_buffer_[i].capacity * 3 * sizeof(Real));
-
-        if (success != cudaSuccess)
-        {
-            std::cerr << "cudaMallocManaged failed: " << cudaGetErrorString(success) << std::endl;
-            throw std::runtime_error("Memory allocation failed in perfParticles::initialize");
-        }
-
-        success = cudaMallocManaged(&extra_buffer_[i].other, extra_buffer_[i].capacity * sizeof(long));
-
-        if (success != cudaSuccess)
-        {
-            std::cerr << "cudaMallocManaged failed: " << cudaGetErrorString(success) << std::endl;
-            throw std::runtime_error("Memory allocation failed in perfParticles::initialize");
-        }*/
     }
+
+    // update device mempool release threshold
+    size_t threshold;
+    cudaMemPool_t pool;
+
+    cudaDeviceGetDefaultMemPool(&pool, 0);
+    cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReleaseThreshold, &threshold);
+    threshold = std::max(threshold, size_t((num_row_buffers_ + 1) * sizeof(unsigned long long int) + total_capacity_ * (5 * sizeof(Real) + 2 * sizeof(unsigned long long int))));
+    cudaMemPoolSetAttribute(pool, cudaMemPoolAttrReleaseThreshold, &threshold);
 }
 
 // Add a particle to the handler
@@ -614,17 +587,6 @@ bool perfParticles<part, part_info>::addParticle_global(part & newPart)
         return false;
     }
 
-    // check if we have space to add particle
-    /*if (num_particles_ >= total_capacity_)
-    {
-        // realloc
-        //total_capacity_ += extra_capacity_;
-        //p = (Real *)realloc(p, total_capacity_ * 3 * sizeof(Real));
-        //q = (Real *)realloc(q, total_capacity_ * 3 * sizeof(Real));
-        //other = (long *)realloc(other, total_capacity_ * sizeof(long));
-        resizeGlobalBuffers(total_capacity_ + extra_capacity_);
-    }*/
-
     if (extra_buffer_[4].count >= extra_buffer_[4].capacity)
     {
         flushExtraBuffer(4);
@@ -639,21 +601,6 @@ bool perfParticles<part, part_info>::addParticle_global(part & newPart)
     extra_buffer_[4].other[extra_buffer_[4].count] = newPart.ID;
 
     extra_buffer_[4].count++;
-
-    // Add the particle to the global array
-    /*for (int i = 0; i < 3; i++)
-    {
-        p[3 * num_particles_ + i] = newPart.pos[i];
-        q[3 * num_particles_ + i] = newPart.vel[i];
-    }
-    other[num_particles_] = newPart.ID;*/
-
-    //cudaMemcpy(p + 3 * num_particles_, newPart.pos, 3 * sizeof(Real), cudaMemcpyDefault);
-    //cudaMemcpy(q + 3 * num_particles_, newPart.vel, 3 * sizeof(Real), cudaMemcpyDefault);
-    //cudaMemcpy(other + num_particles_, &newPart.ID, sizeof(long), cudaMemcpyDefault);
-
-    // Increment the particle count
-    // num_particles_++;
 
     rows_sorted_ = false;
     
@@ -732,10 +679,329 @@ __global__ void update_pointers(perfParticles<part, part_info> * pcl, unsigned l
     }
 }
 
+// kernel to compute rows for radix sort
+template <typename part, typename part_info>
+__global__ void compute_rows(perfParticles<part, part_info> * pcl, uint32_t * row, unsigned long long int starting_idx)
+{
+    unsigned long long int idx = blockIdx.x * blockDim.x + threadIdx.x + starting_idx;
+
+    if (idx < pcl->num_particles_)
+    {
+        row[idx] = static_cast<uint32_t>(pcl->computeRow(pcl->p[3*idx+1], pcl->p[3*idx+2]));
+    }
+}
+
+// kernel to compute keys for the x-coordinate radix sort
+#ifdef SINGLE
+__global__ void compute_xkeys(uint32_t * keys, unsigned long long int * indices, Real * p, unsigned long long int num_particles)
+#else
+__global__ void compute_xkeys(uint64_t * keys, unsigned long long int * indices, Real * p, unsigned long long int num_particles)
+#endif
+{
+    unsigned long long int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < num_particles)
+    {
+#ifdef SINGLE
+        keys[idx] = __float_as_uint(p[3 * indices[idx]]);
+#else
+        keys[idx] = static_cast<uint64_t>(__double_as_longlong(p[3 * indices[idx]]));
+#endif
+    }
+}
+
+// kernel to compute row offsets from sorted row keys
+// offsets size must be num_rows + 1, where offsets[num_rows] = num_particles
+__global__ void compute_row_offsets(const uint32_t * keys, unsigned long long int num_particles, unsigned long long int * offsets, uint32_t num_rows)
+{
+    uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (row > num_rows)
+    {
+        return;
+    }
+
+    if (row == num_rows)
+    {
+        offsets[row] = num_particles;
+        return;
+    }
+
+    unsigned long long int left = 0;
+    unsigned long long int right = num_particles;
+
+    while (left < right)
+    {
+        unsigned long long int mid = (left + right) / 2;
+
+        if (keys[mid] < row)
+        {
+            left = mid + 1;
+        }
+        else
+        {
+            right = mid;
+        }
+    }
+
+    offsets[row] = left;
+}
+
+// kernel to reorder particle data after radix sort
+template <typename part, typename part_info, typename T>
+__global__ void reorder_data(perfParticles<part, part_info> * pcl, unsigned long long int * indices_out, T * data_in, T * data_out, size_t stride, size_t ndata)
+{
+    unsigned long long int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < ndata)
+    {
+        unsigned long long int pcl_idx = indices_out[idx / stride];
+
+        data_out[idx] = data_in[pcl_idx * stride + (idx % stride)];
+    }
+}
+
+// prepare communication
+template <typename part, typename part_info>
+void perfParticles<part, part_info>::prepareComm(unsigned long long int * send_begin, uint32_t ** d_keys, void ** d_temp, cudaStream_t & stream)
+{
+    uint32_t * d_keys_in = nullptr;
+    unsigned long long int * d_indices_in = nullptr;
+    unsigned long long int * d_indices_out = nullptr;
+    size_t temp_storage_bytes = 0;
+    int end_bit = static_cast<int>(ceil(log2(static_cast<double>(num_row_buffers_ + 10))));
+
+    auto success = cudaMallocAsync(&d_indices_in, num_particles_ * sizeof(unsigned long long int) * 2L, stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA malloc for d_indices_in");
+    }
+
+    success = cudaMallocAsync(&d_keys_in, num_particles_ * sizeof(uint32_t), stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA malloc for d_keys_in");
+    }
+
+    d_indices_out = d_indices_in + num_particles_;
+
+    // generate radix keys and indices
+    nvtxRangePushA("prepareComm: compute radix keys and indices");
+
+    if (*d_keys == nullptr)
+    {
+        success = cudaMallocAsync(d_keys, total_capacity_ * sizeof(uint32_t), stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error in CUDA malloc for d_keys");
+        }
+    }
+
+    compute_rows<<<(num_particles_+127)/128, 128, 0, stream>>>(this, d_keys_in);
+
+    thrust::sequence(thrust::cuda::par.on(stream), d_indices_in, d_indices_in + num_particles_, 0);
+
+    nvtxRangePop();
+
+    // radix sort
+    nvtxRangePushA("prepareComm: radix sort");
+    // get temporary storage
+    cub::DeviceRadixSort::SortPairs(nullptr, temp_storage_bytes, d_keys_in, *d_keys, d_indices_in, d_indices_out, num_particles_, 0, end_bit, stream);
+
+    temp_storage_bytes = std::max(temp_storage_bytes, num_particles_ * 3 * sizeof(Real));
+
+    success = cudaMallocAsync(d_temp, temp_storage_bytes, stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA malloc for d_temp_storage");
+    }
+
+    // sort
+    cub::DeviceRadixSort::SortPairs(*d_temp, temp_storage_bytes, d_keys_in, *d_keys, d_indices_in, d_indices_out, num_particles_, 0, end_bit, stream);
+    nvtxRangePop();
+
+    cudaFreeAsync(d_keys_in, stream);
+
+    reorderParticles(d_indices_out, *d_temp, stream);
+
+    cudaFreeAsync(d_indices_in, stream);
+
+    nvtxRangePushA("prepareComm: update pointers");
+
+    update_pointers<<<(num_row_buffers_+137)/128, 128, 0, stream>>>(this, send_begin);
+
+    success = cudaStreamSynchronize(stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA kernel failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA kernel update_pointers");
+    }
+    nvtxRangePop();
+
+    rows_sorted_ = false;
+}
+
+// compute sort indices
+template <typename part, typename part_info>
+void perfParticles<part, part_info>::computeSortIndices(uint32_t * d_keys, unsigned long long int * d_indices, void ** d_temp, cudaStream_t & stream)
+{
+    uint32_t * d_keys_out;
+    unsigned long long int * d_indices_out;
+    unsigned long long int * row_offsets;
+#ifdef SINGLE
+    uint32_t * d_xkeys_in;
+    uint32_t * d_xkeys_out;
+#else
+    uint64_t * d_xkeys_in;
+    uint64_t * d_xkeys_out;
+#endif
+    size_t temp_storage_bytes = 0;
+    size_t temp_storage_bytes2 = 0;
+    int end_bit = static_cast<int>(ceil(log2(static_cast<double>(num_row_buffers_))));
+
+    auto success = cudaMallocAsync(&d_keys_out, num_particles_ * sizeof(uint32_t), stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA malloc for d_keys_out");
+    }
+
+    d_indices_out = d_indices + num_particles_;
+
+    thrust::sequence(thrust::cuda::par.on(stream), d_indices, d_indices + num_particles_, 0);
+    cub::DeviceRadixSort::SortPairs(nullptr, temp_storage_bytes, d_keys, d_keys_out, d_indices, d_indices_out, num_particles_, 0, end_bit, stream);
+    temp_storage_bytes = std::max(temp_storage_bytes, num_particles_ * 3 * sizeof(Real));
+
+    success = cudaMallocAsync(d_temp, temp_storage_bytes, stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA malloc for d_temp");
+    }
+
+    // sort
+    cub::DeviceRadixSort::SortPairs(*d_temp, temp_storage_bytes, d_keys, d_keys_out, d_indices, d_indices_out, num_particles_, 0, end_bit, stream);
+
+    success = cudaMallocAsync((void **) & row_offsets, (num_row_buffers_+1) * sizeof(unsigned long long int), stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA malloc for row_offsets");
+    }
+
+    // compute row offsets
+    compute_row_offsets<<<(num_row_buffers_+1+127)/128, 128, 0, stream>>>(d_keys_out, num_particles_, row_offsets, num_row_buffers_);
+
+#ifdef SINGLE
+    d_xkeys_in = d_keys;
+    d_xkeys_out = d_keys_out;
+#else
+    cudaFreeAsync(d_keys, stream);
+    cudaFreeAsync(d_keys_out, stream);
+    success = cudaMallocAsync((void **) & d_xkeys_in, num_particles_ * sizeof(uint64_t), stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA malloc for d_xkeys_in");
+    }
+    success = cudaMallocAsync((void **) & d_xkeys_out, num_particles_ * sizeof(uint64_t), stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA malloc for d_xkeys_out");
+    }
+#endif
+
+    // generate keys for x-ordering
+    compute_xkeys<<<(num_particles_+127)/128, 128, 0, stream>>>(d_xkeys_in, d_indices_out, p, num_particles_);
+    // sort by x-keys
+    cub::DeviceSegmentedSort::SortPairs(nullptr, temp_storage_bytes2, d_xkeys_in, d_xkeys_out, d_indices_out, d_indices, num_particles_, num_row_buffers_, row_offsets, row_offsets+1, stream);
+
+    if (temp_storage_bytes2 > temp_storage_bytes)
+    {
+        cudaFreeAsync(*d_temp, stream);
+        success = cudaMallocAsync(d_temp, temp_storage_bytes2, stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error in CUDA malloc for d_temp");
+        }
+    }
+
+    cub::DeviceSegmentedSort::SortPairs(*d_temp, temp_storage_bytes2, d_xkeys_in, d_xkeys_out, d_indices_out, d_indices, num_particles_, num_row_buffers_, row_offsets, row_offsets+1, stream);
+    cudaFreeAsync(d_xkeys_in, stream);
+    cudaFreeAsync(d_xkeys_out, stream);
+    cudaFreeAsync(row_offsets, stream);
+}
+
+// reorder particles
+template <typename part, typename part_info>
+void perfParticles<part, part_info>::reorderParticles(unsigned long long int * d_indices, void * d_temp, cudaStream_t & stream)
+{
+    nvtxRangePushA("reorderParticles");
+
+    // reorder ID data
+    reorder_data<<<(num_particles_ + 127)/128, 128, 0, stream>>>(this, d_indices, other, (long *) d_temp, 1, num_particles_);
+
+    // copy back to other
+    auto success = cudaMemcpyAsync(other, d_temp, num_particles_ * sizeof(long), cudaMemcpyDeviceToDevice, stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA memcpy failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA memcpy for other array");
+    }
+
+    // reorder position data
+    reorder_data<<<(num_particles_ * 3 + 127)/128, 128, 0, stream>>>(this, d_indices, p, (Real*) d_temp, 3, num_particles_ * 3);
+
+    // reorder momentum data using old position array as target
+    reorder_data<<<(num_particles_ * 3 + 127)/128, 128, 0, stream>>>(this, d_indices, q, p, 3, num_particles_ * 3);
+
+    success = cudaStreamSynchronize(stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA kernel failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA kernel reorder_data");
+    }
+
+    // swap pointers around
+    Real * q_old = q;
+    q = p;
+    p = q_old;
+
+    // copy position data back from temporary array
+    success = cudaMemcpyAsync(p, d_temp, num_particles_ * 3 * sizeof(Real), cudaMemcpyDeviceToDevice, stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA memcpy failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA memcpy for position array");
+    }
+
+    nvtxRangePop();
+}
+
 // update row buffers
 template <typename part, typename part_info>
 void perfParticles<part, part_info>::updateRowBuffers(unsigned long long int * send_begin)
 {
+#ifndef DEBUG_RADIX_SORT
+    uint32_t * d_keys_in = nullptr;
+    unsigned long long int * d_indices = nullptr;
+    void * d_temp = nullptr;
+    cudaStream_t pcl_stream;
+
+    auto success = cudaStreamCreateWithFlags(&pcl_stream, cudaStreamNonBlocking);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA stream creation failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA stream creation for moveParticles");
+    }
+#endif
+
     // check if adding buffer is empty, otherwise add particles to global buffer
     nvtxRangePushA("updateRowBuffers: add particles");
 
@@ -743,6 +1009,8 @@ void perfParticles<part, part_info>::updateRowBuffers(unsigned long long int * s
 
     nvtxRangePop();
 
+    nvtxRangePushA("updateRowBuffers: sort");
+ #ifdef DEBUG_RADIX_SORT
     // tuple-pointer to particle properties
     tripleReal * pos = (tripleReal *) p;
     tripleReal * vel = (tripleReal *) q;
@@ -752,8 +1020,6 @@ void perfParticles<part, part_info>::updateRowBuffers(unsigned long long int * s
     auto zip_end = thrust::make_zip_iterator(thrust::make_tuple(pos + num_particles_, vel + num_particles_, other + num_particles_));
 
     using zip_iter = typename decltype(zip_begin)::value_type;
-
-    nvtxRangePushA("updateRowBuffers: sort");
 
     // sort particles
     thrust::sort(thrust::device, zip_begin, zip_end, [this] __device__ (zip_iter a, zip_iter b) {
@@ -770,56 +1036,50 @@ void perfParticles<part, part_info>::updateRowBuffers(unsigned long long int * s
 
         return row_a < row_b;
     });
+#else
+    success = cudaMallocAsync(&d_keys_in, num_particles_ * sizeof(uint32_t), pcl_stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA malloc for d_keys_in");
+    }
 
+    success = cudaMallocAsync(&d_indices, num_particles_ * sizeof(unsigned long long int) * 2L, pcl_stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA malloc for d_indices");
+    }
+
+    compute_rows<<<(num_particles_+127)/128, 128, 0, pcl_stream>>>(this, d_keys_in);
+
+    computeSortIndices(d_keys_in, d_indices, &d_temp, pcl_stream);
+
+    reorderParticles(d_indices, d_temp, pcl_stream);
+
+    cudaFreeAsync(d_temp, pcl_stream);
+    cudaFreeAsync(d_indices, pcl_stream);
+
+    success = cudaStreamSynchronize(pcl_stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA kernel failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA kernel reorder_data");
+    }
+
+    cudaStreamDestroy(pcl_stream);
+#endif
     nvtxRangePop();
 
     nvtxRangePushA("updateRowBuffers: update pointers");
 
-    // loop over row buffers
-    /*for (int row = 0; row < num_row_buffers_; row++)
+    update_pointers<<<(num_row_buffers_+137)/128, 128>>>(this, send_begin);
+
+    auto success2 = cudaDeviceSynchronize();
+
+    if (success2 != cudaSuccess)
     {
-        auto row_begin = thrust::lower_bound(thrust::device, zip_begin, zip_end, row, [this] __device__ (zip_iter a, int row) {
-            auto pos_a = thrust::get<0>(a);
-            return computeRow(((Real *) (&pos_a))[1], ((Real *) (&pos_a))[2]) < row;
-        });
-
-        auto row_end = thrust::upper_bound(thrust::device, row_begin, zip_end, row, [this] __device__ (int row, zip_iter a) {
-            auto pos_a = thrust::get<0>(a);
-            return row < computeRow(((Real *) (&pos_a))[1], ((Real *) (&pos_a))[2]);
-        });
-
-        row_buffers_[row].count = row_end - row_begin;
-
-        if (row_buffers_[row].count > 0)
-        {
-            row_buffers_[row].p = (Real *) & thrust::get<0>(*row_begin);
-            row_buffers_[row].q = (Real *) & thrust::get<1>(*row_begin);
-            row_buffers_[row].other = & thrust::get<2>(*row_begin);
-        }
-        else
-        {
-            row_buffers_[row].p = nullptr;
-            row_buffers_[row].q = nullptr;
-            row_buffers_[row].other = nullptr;
-        }
-
-        row_buffers_[row].sorted = true;
-    }*/
-
-    if (send_begin != nullptr)
-    {
-        update_pointers<<<(num_row_buffers_+137)/128, 128>>>(this, send_begin);
-    }
-    else
-    {
-        update_pointers<<<(num_row_buffers_+127)/128, 128>>>(this, nullptr);
-    }
-
-    auto success = cudaDeviceSynchronize();
-
-    if (success != cudaSuccess)
-    {
-        std::cerr << "CUDA kernel failed: " << cudaGetErrorString(success) << std::endl;
+        std::cerr << "CUDA kernel failed: " << cudaGetErrorString(success2) << std::endl;
         throw std::runtime_error("Error in CUDA kernel update_pointers");
     }
 
@@ -1116,78 +1376,60 @@ template <typename part, typename part_info>
 template <typename UpdateFunct>
 void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int * reduce_type, int noutput)
 {
+    unsigned long long int send_begin[10];
+#ifndef DEBUG_RADIX_SORT
+    uint32_t * d_keys = nullptr;
+    void * d_temp = nullptr;
+    uint64_t start_num_particles;
+    uint64_t start_capacity = total_capacity_;
+    cudaStream_t pcl_stream;
+
+    auto success = cudaStreamCreateWithFlags(&pcl_stream, cudaStreamNonBlocking);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA stream creation failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA stream creation for moveParticles");
+    }
+#endif
+
     nvtxRangePushA("moveParticles: updateParticles");
 
     updateParticles(move_funct, dtau, fields, nfields, params, output, reduce_type, noutput);
 
     nvtxRangePop();
 
-    /*for (int i = 0; i < num_row_buffers_; i++)
-    {
-        row_buffers_[i].sorted = false;
-    }*/
-
     thrust::for_each(thrust::device, row_buffers_, row_buffers_ + num_row_buffers_, [] __device__ (row_buffer<Real, Real, long> & rb) { rb.sorted = false;});
 
     rows_sorted_ = false;
 
+#ifdef DEBUG_RADIX_SORT
     nvtxRangePushA("moveParticles: updateRowBuffers");
-
-    unsigned long long int send_begin[10];
 
     updateRowBuffers(&send_begin[0]);
 
     nvtxRangePop();
+#else
+    nvtxRangePushA("moveParticles: prepareComm");
 
+    prepareComm(&send_begin[0], &d_keys, &d_temp, pcl_stream);
+
+    cudaFreeAsync(d_temp, pcl_stream); // free temporary storage for now (FIXME: maybe reuse later)
+
+    nvtxRangePop();
+#endif
     // memory movement
-
-    //row_buffer<Real, Real, long> send_buffer[9];
 
     nvtxRangePushA("moveParticles: set up communication buffers");
 
-    /*tripleReal * pos = (tripleReal *) p;
-    tripleReal * vel = (tripleReal *) q;
-
-    // create zip iterator from tuples
-    auto zip_begin = thrust::make_zip_iterator(thrust::make_tuple(pos, vel, other));
-    auto zip_end = thrust::make_zip_iterator(thrust::make_tuple(pos + num_particles_, vel + num_particles_, other + num_particles_));
-
-    using zip_iter = typename decltype(zip_begin)::value_type;
-
-    auto rec_begin = thrust::lower_bound(thrust::device, zip_begin, zip_end, num_row_buffers_, [this] __host__ __device__ (zip_iter a, int row) {
-        auto pos_a = thrust::get<0>(a);
-        return computeRow(((Real *) (&pos_a))[1], ((Real *) (&pos_a))[2]) < row;
-    });*/
-
-    /*send_buffer[4].count = 0;
-    send_buffer[4].capacity = -1;
-
-    send_buffer[4].p = (Real *) & thrust::get<0>(*rec_begin);
-    send_buffer[4].q = (Real *) & thrust::get<1>(*rec_begin);
-    send_buffer[4].other = & thrust::get<2>(*rec_begin);*/
-
-    num_particles_ = send_begin[0]; //rec_begin - zip_begin;
+    num_particles_ = send_begin[0];
+#ifndef DEBUG_RADIX_SORT
+    start_num_particles = num_particles_;
+#endif
 
     // loop over send buffers
     for (int proc = 0; proc < 9; proc++)
     {
-        //if (proc == 4)
-        //{
-        //    continue;
-        //}
-        //else
-        //{
-        /*auto send_begin = thrust::lower_bound(thrust::device, rec_begin, zip_end, num_row_buffers_+proc, [this] __host__ __device__ (zip_iter a, int row) {
-            auto pos_a = thrust::get<0>(a);
-            return computeRow(((Real *) (&pos_a))[1], ((Real *) (&pos_a))[2]) < row;
-        });
-
-        auto send_end = thrust::upper_bound(thrust::device, send_begin, zip_end, num_row_buffers_+proc, [this] __host__ __device__ (int row, zip_iter a) {
-            auto pos_a = thrust::get<0>(a);
-            return row < computeRow(((Real *) (&pos_a))[1], ((Real *) (&pos_a))[2]);
-        });*/
-
-        extra_buffer_[proc].count = send_begin[proc+1] - send_begin[proc]; //send_end - send_begin;
+        extra_buffer_[proc].count = send_begin[proc+1] - send_begin[proc];
 
         if (extra_buffer_[proc].count > 0)
         {
@@ -1209,35 +1451,6 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
             cudaMemcpy(extra_buffer_[proc].q, q + 3*send_begin[proc], extra_buffer_[proc].count * 3 * sizeof(Real), cudaMemcpyDefault);
             cudaMemcpy(extra_buffer_[proc].other, other + send_begin[proc], extra_buffer_[proc].count * sizeof(long), cudaMemcpyDefault);
         }
-
-        //extra_buffer_[proc].capacity = extra_buffer_[proc].count;
-
-        /*if (extra_buffer_[proc].count > 0)
-        {
-            // use cudaMallocManaged
-            cudaMallocManaged(&send_buffer[proc].p, send_buffer[proc].count * 3 * sizeof(Real));
-
-            send_buffer[proc].p = (Real *)malloc(send_buffer[proc].count * 3 * sizeof(Real));
-            send_buffer[proc].q = (Real *)malloc(send_buffer[proc].count * 3 * sizeof(Real));
-            send_buffer[proc].other = (long *)malloc(send_buffer[proc].count * sizeof(long));
-
-
-            // copy particles to send buffer using memcpy
-            //memcpy(send_buffer[proc].p, & thrust::get<0>(*send_begin), send_buffer[proc].count * 3 * sizeof(Real));
-            //memcpy(send_buffer[proc].q, & thrust::get<1>(*send_begin), send_buffer[proc].count * 3 * sizeof(Real));
-            //memcpy(send_buffer[proc].other, & thrust::get<2>(*send_begin), send_buffer[proc].count * sizeof(long));
-
-            cudaMemcpy(send_buffer[proc].p, & thrust::get<0>(*send_begin), send_buffer[proc].count * 3 * sizeof(Real), cudaMemcpyDefault);
-            cudaMemcpy(send_buffer[proc].q, & thrust::get<1>(*send_begin), send_buffer[proc].count * 3 * sizeof(Real), cudaMemcpyDefault);
-            cudaMemcpy(send_buffer[proc].other, & thrust::get<2>(*send_begin), send_buffer[proc].count * sizeof(long), cudaMemcpyDefault);
-        }
-        else
-        {
-            send_buffer[proc].p = nullptr;
-            send_buffer[proc].q = nullptr;
-            send_buffer[proc].other = nullptr;
-        }*/
-        //}
     }
 
     nvtxRangePop();
@@ -1274,17 +1487,6 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
             parallel.send_dim1(extra_buffer_[8].q, 3*extra_buffer_[8].count, (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
             parallel.send_dim1(extra_buffer_[8].other, extra_buffer_[8].count, (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
         }
-
-        // free send buffer particle arrays
-        /*free(send_buffer[2].p);
-        free(send_buffer[5].p);
-        free(send_buffer[8].p);
-        free(send_buffer[2].q);
-        free(send_buffer[5].q);
-        free(send_buffer[8].q);
-        free(send_buffer[2].other);
-        free(send_buffer[5].other);
-        free(send_buffer[8].other);*/
     }
     
     if (parallel.grid_rank()[1] % 2 == 1 || (parallel.grid_rank()[1] == 0 && parallel.grid_size()[1] % 2 == 1)) // odd rank or rank 0 with odd grid size
@@ -1298,27 +1500,19 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
             {
                 extra_buffer_[1].resizeManaged(extra_buffer_[1].count + buffer_sizes[0] + extra_capacity_);
             }
-            //extra_buffer_[1].resize(buffer_sizes[0]+extra_buffer_[1].count);
+            
             parallel.receive_dim1(extra_buffer_[1].p+3*extra_buffer_[1].count, 3*buffer_sizes[0], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[1].q+3*extra_buffer_[1].count, 3*buffer_sizes[0], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[1].other+extra_buffer_[1].count, buffer_sizes[0], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
             extra_buffer_[1].count += buffer_sizes[0];
         }
         if (buffer_sizes[1] > 0)
-        {
-            /*if (num_particles_ + buffer_sizes[1] > total_capacity_)
-            {
-                resizeGlobalBuffers(total_capacity_ + buffer_sizes[1] + extra_capacity_);
-                send_buffer[4].p = p + 3*num_particles_;
-                send_buffer[4].q = q + 3*num_particles_;
-                send_buffer[4].other = other + num_particles_;
-            }*/
-           
+        {        
             if (extra_buffer_[4].count + buffer_sizes[1] > extra_buffer_[4].capacity)
             {
                 extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[1] + extra_capacity_);
             }
-            //extra_buffer_[4].resize(buffer_sizes[1]+extra_buffer_[4].count);
+            
             parallel.receive_dim1(extra_buffer_[4].p, 3*buffer_sizes[1], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[4].q, 3*buffer_sizes[1], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[4].other, buffer_sizes[1], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
@@ -1330,7 +1524,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
             {
                 extra_buffer_[7].resizeManaged(extra_buffer_[7].count + buffer_sizes[2] + extra_capacity_);
             }
-            //extra_buffer_[7].resize(buffer_sizes[2]+extra_buffer_[7].count);
+            
             parallel.receive_dim1(extra_buffer_[7].p+3*extra_buffer_[7].count, 3*buffer_sizes[2], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[7].q+3*extra_buffer_[7].count, 3*buffer_sizes[2], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[7].other+extra_buffer_[7].count, buffer_sizes[2], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
@@ -1364,17 +1558,6 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
             parallel.send_dim1(extra_buffer_[6].q, 3*extra_buffer_[6].count, parallel.grid_rank()[1]-1);
             parallel.send_dim1(extra_buffer_[6].other, extra_buffer_[6].count, parallel.grid_rank()[1]-1);
         }
-
-        // free send buffer particle arrays
-        /*free(send_buffer[0].p);
-        free(send_buffer[3].p);
-        free(send_buffer[6].p);
-        free(send_buffer[0].q);
-        free(send_buffer[3].q);
-        free(send_buffer[6].q);
-        free(send_buffer[0].other);
-        free(send_buffer[3].other);
-        free(send_buffer[6].other);*/
     }
     else
     {
@@ -1386,7 +1569,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
             {
                 extra_buffer_[1].resizeManaged(extra_buffer_[1].count + buffer_sizes[0] + extra_capacity_);
             }
-            //extra_buffer_[1].resize(buffer_sizes[0]+extra_buffer_[1].count);
+            
             parallel.receive_dim1(extra_buffer_[1].p+3*extra_buffer_[1].count, 3*buffer_sizes[0], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[1].q+3*extra_buffer_[1].count, 3*buffer_sizes[0], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[1].other+extra_buffer_[1].count, buffer_sizes[0], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
@@ -1394,19 +1577,11 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         }
         if (buffer_sizes[1] > 0)
         {
-            /*if (num_particles_ + send_buffer[4].count + buffer_sizes[1] > total_capacity_)
-            {
-                resizeGlobalBuffers(total_capacity_ + send_buffer[4].count + buffer_sizes[1] + extra_capacity_);
-                send_buffer[4].p = p + 3*num_particles_;
-                send_buffer[4].q = q + 3*num_particles_;
-                send_buffer[4].other = other + num_particles_;
-            }*/
-
             if (extra_buffer_[4].count + buffer_sizes[1] > extra_buffer_[4].capacity)
             {
                 extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[1] + extra_capacity_);
             }
-            //extra_buffer_[4].resize(buffer_sizes[1]+extra_buffer_[4].count);
+            
             parallel.receive_dim1(extra_buffer_[4].p+3*extra_buffer_[4].count, 3*buffer_sizes[1], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[4].q+3*extra_buffer_[4].count, 3*buffer_sizes[1], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[4].other+extra_buffer_[4].count, buffer_sizes[1], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
@@ -1418,7 +1593,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
             {
                 extra_buffer_[7].resizeManaged(extra_buffer_[7].count + buffer_sizes[2] + extra_capacity_);
             }
-            //extra_buffer_[7].resize(buffer_sizes[2]+extra_buffer_[7].count);
+            
             parallel.receive_dim1(extra_buffer_[7].p+3*extra_buffer_[7].count, 3*buffer_sizes[2], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[7].q+3*extra_buffer_[7].count, 3*buffer_sizes[2], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[7].other+extra_buffer_[7].count, buffer_sizes[2], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
@@ -1452,17 +1627,6 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
             parallel.send_dim1(extra_buffer_[6].q, 3*extra_buffer_[6].count, (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
             parallel.send_dim1(extra_buffer_[6].other, extra_buffer_[6].count, (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
         }
-
-        // free send buffer particle arrays
-        /*free(send_buffer[0].p);
-        free(send_buffer[3].p);
-        free(send_buffer[6].p);
-        free(send_buffer[0].q);
-        free(send_buffer[3].q);
-        free(send_buffer[6].q);
-        free(send_buffer[0].other);
-        free(send_buffer[3].other);
-        free(send_buffer[6].other);*/
     }
     else
     {
@@ -1474,7 +1638,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
             {
                 extra_buffer_[1].resizeManaged(extra_buffer_[1].count + buffer_sizes[0] + extra_capacity_);
             }
-            //extra_buffer_[1].resize(buffer_sizes[0]+extra_buffer_[1].count);
+            
             parallel.receive_dim1(extra_buffer_[1].p+3*extra_buffer_[1].count, 3*buffer_sizes[0], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[1].q+3*extra_buffer_[1].count, 3*buffer_sizes[0], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[1].other+extra_buffer_[1].count, buffer_sizes[0], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
@@ -1482,19 +1646,11 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         }
         if (buffer_sizes[1] > 0)
         {
-            /*if (num_particles_ + send_buffer[4].count + buffer_sizes[1] > total_capacity_)
-            {
-                resizeGlobalBuffers(total_capacity_ + send_buffer[4].count + buffer_sizes[1] + extra_capacity_);
-                send_buffer[4].p = p + 3*num_particles_;
-                send_buffer[4].q = q + 3*num_particles_;
-                send_buffer[4].other = other + num_particles_;
-            }*/
-
             if (extra_buffer_[4].count + buffer_sizes[1] > extra_buffer_[4].capacity)
             {
                 extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[1] + extra_capacity_);
             }
-            //extra_buffer_[4].resize(buffer_sizes[1]+extra_buffer_[4].count);
+            
             parallel.receive_dim1(extra_buffer_[4].p+3*extra_buffer_[4].count, 3*buffer_sizes[1], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[4].q+3*extra_buffer_[4].count, 3*buffer_sizes[1], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[4].other+extra_buffer_[4].count, buffer_sizes[1], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
@@ -1506,7 +1662,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
             {
                 extra_buffer_[7].resizeManaged(extra_buffer_[7].count + buffer_sizes[2] + extra_capacity_);
             }
-            //extra_buffer_[7].resize(buffer_sizes[2]+extra_buffer_[7].count);
+            
             parallel.receive_dim1(extra_buffer_[7].p+3*extra_buffer_[7].count, 3*buffer_sizes[2], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[7].q+3*extra_buffer_[7].count, 3*buffer_sizes[2], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[7].other+extra_buffer_[7].count, buffer_sizes[2], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
@@ -1540,17 +1696,6 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
             parallel.send_dim1(extra_buffer_[8].q, 3*extra_buffer_[8].count, (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
             parallel.send_dim1(extra_buffer_[8].other, extra_buffer_[8].count, (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
         }
-
-        // free send buffer particle arrays
-        /*free(send_buffer[2].p);
-        free(send_buffer[5].p);
-        free(send_buffer[8].p);
-        free(send_buffer[2].q);
-        free(send_buffer[5].q);
-        free(send_buffer[8].q);
-        free(send_buffer[2].other);
-        free(send_buffer[5].other);
-        free(send_buffer[8].other);*/
     }
     else if (parallel.grid_rank()[1] > 0 || parallel.grid_size()[1] % 2 == 0)
     {
@@ -1562,7 +1707,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
             {
                 extra_buffer_[1].resizeManaged(extra_buffer_[1].count + buffer_sizes[0] + extra_capacity_);
             }
-            //extra_buffer_[1].resize(buffer_sizes[0]+extra_buffer_[1].count);
+            
             parallel.receive_dim1(extra_buffer_[1].p+3*extra_buffer_[1].count, 3*buffer_sizes[0], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[1].q+3*extra_buffer_[1].count, 3*buffer_sizes[0], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[1].other+extra_buffer_[1].count, buffer_sizes[0], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
@@ -1570,19 +1715,11 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         }
         if (buffer_sizes[1] > 0)
         {
-            /*if (num_particles_ + send_buffer[4].count + buffer_sizes[1] > total_capacity_)
-            {
-                resizeGlobalBuffers(total_capacity_ + send_buffer[4].count + buffer_sizes[1] + extra_capacity_);
-                send_buffer[4].p = p + 3*num_particles_;
-                send_buffer[4].q = q + 3*num_particles_;
-                send_buffer[4].other = other + num_particles_;
-            }*/
-
             if (extra_buffer_[4].count + buffer_sizes[1] > extra_buffer_[4].capacity)
             {
                 extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[1] + extra_capacity_);
             }
-            //extra_buffer_[4].resize(buffer_sizes[1]+extra_buffer_[4].count);
+            
             parallel.receive_dim1(extra_buffer_[4].p+3*extra_buffer_[4].count, 3*buffer_sizes[1], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[4].q+3*extra_buffer_[4].count, 3*buffer_sizes[1], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[4].other+extra_buffer_[4].count, buffer_sizes[1], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
@@ -1594,7 +1731,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
             {
                 extra_buffer_[7].resizeManaged(extra_buffer_[7].count + buffer_sizes[2] + extra_capacity_);
             }
-            //extra_buffer_[7].resize(buffer_sizes[2]+extra_buffer_[7].count);
+            
             parallel.receive_dim1(extra_buffer_[7].p+3*extra_buffer_[7].count, 3*buffer_sizes[2], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[7].q+3*extra_buffer_[7].count, 3*buffer_sizes[2], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[7].other+extra_buffer_[7].count, buffer_sizes[2], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
@@ -1615,16 +1752,10 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
 
         if (buffer_sizes[0] > 0)
         {
-            //num_particles_ -= buffer_sizes[0];
             parallel.send_dim0(extra_buffer_[7].p, 3*extra_buffer_[7].count, (parallel.grid_rank()[0]+1) % parallel.grid_size()[0]);
             parallel.send_dim0(extra_buffer_[7].q, 3*extra_buffer_[7].count, (parallel.grid_rank()[0]+1) % parallel.grid_size()[0]);
             parallel.send_dim0(extra_buffer_[7].other, extra_buffer_[7].count, (parallel.grid_rank()[0]+1) % parallel.grid_size()[0]);
         }
-
-        // free send buffer particle arrays
-        /*free(send_buffer[7].p);
-        free(send_buffer[7].q);
-        free(send_buffer[7].other);*/
     }
     
     if (parallel.grid_rank()[0] % 2 == 1 || (parallel.grid_rank()[0] == 0 && parallel.grid_size()[0] % 2 == 1)) // odd rank or rank 0 with odd grid size
@@ -1633,19 +1764,11 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
 
         if (buffer_sizes[0] > 0)
         {
-            /*if (num_particles_ + send_buffer[4].count + buffer_sizes[0] > total_capacity_)
-            {
-                resizeGlobalBuffers(total_capacity_ + send_buffer[4].count + buffer_sizes[0] + extra_capacity_);
-                send_buffer[4].p = p + 3*num_particles_;
-                send_buffer[4].q = q + 3*num_particles_;
-                send_buffer[4].other = other + num_particles_;
-            }*/
-
             if (extra_buffer_[4].count + buffer_sizes[0] > extra_buffer_[4].capacity)
             {
                 extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[0] + extra_capacity_);
             }
-            //extra_buffer_[4].resize(buffer_sizes[0]+extra_buffer_[4].count);
+            
             parallel.receive_dim0(extra_buffer_[4].p+3*extra_buffer_[4].count, 3*buffer_sizes[0], (parallel.grid_rank()[0]+parallel.grid_size()[0]-1) % parallel.grid_size()[0]);
             parallel.receive_dim0(extra_buffer_[4].q+3*extra_buffer_[4].count, 3*buffer_sizes[0], (parallel.grid_rank()[0]+parallel.grid_size()[0]-1) % parallel.grid_size()[0]);
             parallel.receive_dim0(extra_buffer_[4].other+extra_buffer_[4].count, buffer_sizes[0], (parallel.grid_rank()[0]+parallel.grid_size()[0]-1) % parallel.grid_size()[0]);
@@ -1666,11 +1789,6 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
             parallel.send_dim0(extra_buffer_[1].q, 3*extra_buffer_[1].count, parallel.grid_rank()[0]-1);
             parallel.send_dim0(extra_buffer_[1].other, extra_buffer_[1].count, parallel.grid_rank()[0]-1);
         }
-
-        // free send buffer particle arrays
-        /*free(send_buffer[1].p);
-        free(send_buffer[1].q);
-        free(send_buffer[1].other);*/
     }
     else
     {
@@ -1678,19 +1796,11 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
 
         if (buffer_sizes[0] > 0)
         {
-            /*if (num_particles_ + send_buffer[4].count + buffer_sizes[0] > total_capacity_)
-            {
-                resizeGlobalBuffers(total_capacity_ + send_buffer[4].count + buffer_sizes[0] + extra_capacity_);
-                send_buffer[4].p = p + 3*num_particles_;
-                send_buffer[4].q = q + 3*num_particles_;
-                send_buffer[4].other = other + num_particles_;
-            }*/
-
             if (extra_buffer_[4].count + buffer_sizes[0] > extra_buffer_[4].capacity)
             {
                 extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[0] + extra_capacity_);
             }
-            //extra_buffer_[4].resize(buffer_sizes[0]+extra_buffer_[4].count);
+            
             parallel.receive_dim0(extra_buffer_[4].p+3*extra_buffer_[4].count, 3*buffer_sizes[0], (parallel.grid_rank()[0]+1) % parallel.grid_size()[0]);
             parallel.receive_dim0(extra_buffer_[4].q+3*extra_buffer_[4].count, 3*buffer_sizes[0], (parallel.grid_rank()[0]+1) % parallel.grid_size()[0]);
             parallel.receive_dim0(extra_buffer_[4].other+extra_buffer_[4].count, buffer_sizes[0], (parallel.grid_rank()[0]+1) % parallel.grid_size()[0]);
@@ -1711,11 +1821,6 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
             parallel.send_dim0(extra_buffer_[1].q, 3*extra_buffer_[1].count, (parallel.grid_rank()[0]+parallel.grid_size()[0]-1) % parallel.grid_size()[0]);
             parallel.send_dim0(extra_buffer_[1].other, extra_buffer_[1].count, (parallel.grid_rank()[0]+parallel.grid_size()[0]-1) % parallel.grid_size()[0]);
         }
-
-        // free send buffer particle arrays
-        /*free(send_buffer[1].p);
-        free(send_buffer[1].q);
-        free(send_buffer[1].other);*/
     }
     else
     {
@@ -1723,19 +1828,11 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
 
         if (buffer_sizes[0] > 0)
         {
-            /*if (num_particles_ + send_buffer[4].count + buffer_sizes[0] > total_capacity_)
-            {
-                resizeGlobalBuffers(total_capacity_ + send_buffer[4].count + buffer_sizes[0] + extra_capacity_);
-                send_buffer[4].p = p + 3*num_particles_;
-                send_buffer[4].q = q + 3*num_particles_;
-                send_buffer[4].other = other + num_particles_;
-            }*/
-
             if (extra_buffer_[4].count + buffer_sizes[0] > extra_buffer_[4].capacity)
             {
                 extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[0] + extra_capacity_);
             }
-            //extra_buffer_[4].resize(buffer_sizes[0]+extra_buffer_[4].count);
+            
             parallel.receive_dim0(extra_buffer_[4].p+3*extra_buffer_[4].count, 3*buffer_sizes[0], (parallel.grid_rank()[0]+1) % parallel.grid_size()[0]);
             parallel.receive_dim0(extra_buffer_[4].q+3*extra_buffer_[4].count, 3*buffer_sizes[0], (parallel.grid_rank()[0]+1) % parallel.grid_size()[0]);
             parallel.receive_dim0(extra_buffer_[4].other+extra_buffer_[4].count, buffer_sizes[0], (parallel.grid_rank()[0]+1) % parallel.grid_size()[0]);
@@ -1756,11 +1853,6 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
             parallel.send_dim0(extra_buffer_[7].q, 3*extra_buffer_[7].count, (parallel.grid_rank()[0]+1) % parallel.grid_size()[0]);
             parallel.send_dim0(extra_buffer_[7].other, extra_buffer_[7].count, (parallel.grid_rank()[0]+1) % parallel.grid_size()[0]);
         }
-
-        // free send buffer particle arrays
-        /*free(send_buffer[7].p);
-        free(send_buffer[7].q);
-        free(send_buffer[7].other);*/
     }
     else if (parallel.grid_rank()[0] > 0 || parallel.grid_size()[0] % 2 == 0)
     {
@@ -1768,19 +1860,11 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
 
         if (buffer_sizes[0] > 0)
         {
-            /*if (num_particles_ + send_buffer[4].count + buffer_sizes[0] > total_capacity_)
-            {
-                resizeGlobalBuffers(total_capacity_ + send_buffer[4].count + buffer_sizes[0] + extra_capacity_);
-                send_buffer[4].p = p + 3*num_particles_;
-                send_buffer[4].q = q + 3*num_particles_;
-                send_buffer[4].other = other + num_particles_;
-            }*/
-
             if (extra_buffer_[4].count + buffer_sizes[0] > extra_buffer_[4].capacity)
             {
                 extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[0] + extra_capacity_);
             }
-            //extra_buffer_[4].resize(buffer_sizes[0]+extra_buffer_[4].count);
+            
             parallel.receive_dim0(extra_buffer_[4].p+3*extra_buffer_[4].count, 3*buffer_sizes[0], (parallel.grid_rank()[0]+parallel.grid_size()[0]-1) % parallel.grid_size()[0]);
             parallel.receive_dim0(extra_buffer_[4].q+3*extra_buffer_[4].count, 3*buffer_sizes[0], (parallel.grid_rank()[0]+parallel.grid_size()[0]-1) % parallel.grid_size()[0]);
             parallel.receive_dim0(extra_buffer_[4].other+extra_buffer_[4].count, buffer_sizes[0], (parallel.grid_rank()[0]+parallel.grid_size()[0]-1) % parallel.grid_size()[0]);
@@ -1793,30 +1877,6 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
     // ingest particles from send_buffer[4]
 
     nvtxRangePushA("moveParticles: ingest received particles");
-
-    /*// check if there is enough capacity in the global buffers
-    if (num_particles_ + send_buffer[4].count > total_capacity_)
-    {
-        nvtxRangePushA("moveParticles: resize global buffers");
-        resizeGlobalBuffers(total_capacity_ + send_buffer[4].count + extra_capacity_);
-        nvtxRangePop();
-    }
-
-    nvtxRangePushA("moveParticles: copy particles to global buffers");
-
-    // copy particles from send_buffer[4] to global buffers
-    cudaMemcpy(p+3*num_particles_, send_buffer[4].p, 3*send_buffer[4].count*sizeof(Real), cudaMemcpyDefault);
-    cudaMemcpy(q+3*num_particles_, send_buffer[4].q, 3*send_buffer[4].count*sizeof(Real), cudaMemcpyDefault);
-    cudaMemcpy(other+num_particles_, send_buffer[4].other, send_buffer[4].count*sizeof(long), cudaMemcpyDefault);
-
-    nvtxRangePop();
-
-    // free send buffer particle arrays
-    free(send_buffer[4].p);
-    free(send_buffer[4].q);
-    free(send_buffer[4].other);
-
-    num_particles_ += send_buffer[4].count;*/
 
     flushExtraBuffer(4);
 
@@ -1840,27 +1900,70 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
 
     nvtxRangePop();
 
+#ifdef DEBUG_RADIX_SORT
     nvtxRangePushA("moveParticles: update row buffers");
 
     updateRowBuffers();
 
     nvtxRangePop();
+#else
+    nvtxRangePushA("moveParticles: compute rows for new particles");
 
-    /*// check consistency of particle counts
-    uint64_t count = 0;
-
-    for (int row = 0; row < num_row_buffers_; row++)
+    if (num_particles_ > start_capacity)
     {
-        count += row_buffers_[row].count;
+        uint32_t * d_keys_temp = d_keys;
+
+        success = cudaMallocAsync((void **) &d_keys, num_particles_ * sizeof(uint32_t), pcl_stream);
+        if (success != cudaSuccess)
+        {
+            throw std::runtime_error("CUDA malloc failed in moveParticles");
+        }
+
+        success = cudaMemcpyAsync(d_keys, d_keys_temp, start_num_particles * sizeof(uint32_t), cudaMemcpyDeviceToDevice, pcl_stream);
+        if (success != cudaSuccess)
+        {
+            throw std::runtime_error("CUDA memcpy failed in moveParticles");
+        }
+
+        cudaFreeAsync(d_keys_temp, pcl_stream);
     }
 
-    if (count != num_particles_)
-    {
-        cerr << " proc#" << parallel.rank() << ": Inconsistent particle counts after MPI communication: " << count << " (sum over row buffers) != " << num_particles_  << " (num_particles_); position of first particle not assigned a row: (" << p[3*count] << ", " << p[3*count+1] << ", " << p[3*count+2] << ") which is in fictitious row #" << computeRow(p[3*count+1], p[3*count+2])-num_row_buffers_ << endl;
-        throw std::runtime_error("Inconsistent particle counts");
-    }*/
+    if (num_particles_ > start_num_particles)
+        compute_rows<<<(num_particles_-start_num_particles+127)/128, 128, 0, pcl_stream>>>(this, d_keys, start_num_particles);
 
     nvtxRangePop();
+
+    nvtxRangePushA("moveParticles: sort particles");
+
+    unsigned long long * d_indices_in;
+    success = cudaMallocAsync((void **) &d_indices_in, num_particles_ * sizeof(unsigned long long) * 2L, pcl_stream);
+    if (success != cudaSuccess)
+    {
+        throw std::runtime_error("CUDA malloc failed in moveParticles");
+    }
+
+    computeSortIndices(d_keys, d_indices_in, &d_temp, pcl_stream);
+
+    nvtxRangePop();
+
+    reorderParticles(d_indices_in, d_temp, pcl_stream);
+
+    cudaFreeAsync(d_temp, pcl_stream);
+    cudaFreeAsync(d_indices_in, pcl_stream);
+
+    update_pointers<<<(num_row_buffers_+137)/128, 128, 0, pcl_stream>>>(this, nullptr);
+
+    success = cudaStreamSynchronize(pcl_stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA kernel failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA kernel reorder_data");
+    }
+
+    cudaStreamDestroy(pcl_stream);
+#endif
+
+    nvtxRangePop(); // moveParticles
 }
 
 // project particles
