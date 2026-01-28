@@ -16,7 +16,7 @@ public:
 		//CONSTRUCTORS=================
 
   //! Constructor.
-		Site();
+		__host__ __device__ Site();
 
   /*!
    Constructor with initialization.
@@ -26,7 +26,7 @@ public:
    \sa initialize(Lattice& lattice)
 
    */
-		Site(Lattice& lattice);
+		__host__ __device__ Site(Lattice& lattice);
 
   /*!
    Constructor with initialization.
@@ -37,21 +37,21 @@ public:
    \sa initialize(Lattice& lattice, long index)
 
    */
-		Site(Lattice& lattice, long index);
+		__host__ __device__ Site(Lattice& lattice, long index);
 
 		//INITIALIZATION=================
 		/*!
      Initialization.
      \param lattice : the lattice on which the Site is defined.
      */
-		void initialize(Lattice& lattice);
+		__host__ __device__ void initialize(Lattice& lattice);
 
   /*!
    Constructor with initialization.
    \param lattice : the lattice on which the Site is defined.
    \param index   : set the current index of the field.
    */
-		void initialize(Lattice& lattice, long index);
+		__host__ __device__ void initialize(Lattice& lattice, long index);
 
 		//LOOPING OPERATIONS==============
   /*!
@@ -125,13 +125,13 @@ public:
    The + operator is used to make a displacement of +1 site the the asked direction.
    \param direction : direction of the displacement
    */
-		Site operator+(int direction);
+		__host__ __device__ Site operator+(int direction);
   /*!
    Overloaded operator -
    The - operator is used to make a displacement of -1 site the the asked direction.
    \param direction : direction of the displacement
    */
-		Site operator-(int direction);
+		__host__ __device__ Site operator-(int direction);
 
 		Site move(int direction);
     Site move(int direction, int step);
@@ -148,7 +148,7 @@ public:
   /*!
    \return this method return the current index pointed by the site.
    */
-		long index() const;
+		__host__ __device__ long index() const;
 
   /*!
    Method to set the current index of the site.
@@ -161,13 +161,13 @@ public:
    \param direction : label of the coordinate.
    \return site coordinate of the "direction" dimension
    */
-		int coord(int direction);
+		int coord(int direction) const;
   /*!
    Method which return the local site coordinate of a give dimension
    \param direction : label of the coordinate.
    \return site local coordinate of the "direction" dimension
    */
-		int coordLocal(int direction);
+		int coordLocal(int direction) const;
   /*!
    Method to set the site to a given coordinate.
    \param r : array which contain the coordinate. The array size must be equal to the number of dimension of the lattice
@@ -226,10 +226,10 @@ public:
   cKSite operator-(int asked_direction);
 
 
-  int coordLocal(int asked_direction);
-  int coord(int asked_direction) ;
-  int latCoord(int direction);
-  int latCoordLocal(int direction);
+  int coordLocal(int asked_direction) const;
+  int coord(int asked_direction) const;
+  int latCoord(int direction) const;
+  int latCoordLocal(int direction) const;
 
   bool setCoord(int* r_asked);
   bool setCoord(int x, int y, int z);
@@ -264,10 +264,10 @@ public:
   rKSite operator-(int asked_direction);
 
 
-  int coordLocal(int asked_direction);
-  int coord(int asked_direction) ;
-  int latCoord(int direction);
-  int latCoordLocal(int direction);
+  int coordLocal(int asked_direction) const;
+  int coord(int asked_direction) const;
+  int latCoord(int direction) const;
+  int latCoordLocal(int direction) const;
 
   bool setCoord(int* r_asked);
   bool setCoord(int x, int y, int z);

@@ -182,9 +182,6 @@ public:
      */
   bool addParticle_global(part newPart);
 
-  bool addParticle_global(part newPart, bool assignID);
-
-
   void prepare_RK();
 
 
@@ -362,7 +359,7 @@ void Particles<part,part_info,part_dataType>::initialize(part_info part_global_i
 {
 
   part_global_info_ = part_global_info;
-  COUT << "Initialization of the particles: "<< part_global_info_.type_name <<endl;
+  //COUT << "Initialization of the particles: "<< part_global_info_.type_name <<endl;
 
   part_datatype_=part_datatype;
   numParticles_ = 0;
@@ -407,13 +404,13 @@ void Particles<part,part_info,part_dataType>::initialize(part_info part_global_i
     if(part_has_mass.gos() != -1)
     {
         mass_offset_ = part_has_mass.gos();
-        COUT<< "particles have individual mass" << endl;
+        //COUT<< "particles have individual mass" << endl;
         mass_type_= INDIVIDUAL_MASS;
     }
     else if(info_has_mass.gos() != -1)
     {
         mass_offset_ = info_has_mass.gos();
-        COUT << "all particles have their mass set to: " << *(double*)((char*)&part_global_info_ + mass_offset_)<<endl;
+        //COUT << "all particles have their mass set to: " << *(double*)((char*)&part_global_info_ + mass_offset_)<<endl;
         mass_type_= GLOBAL_MASS;
     }
     else
@@ -421,7 +418,7 @@ void Particles<part,part_info,part_dataType>::initialize(part_info part_global_i
         COUT<< "Particles have to have a mass!!! In part or in part_info."<<endl;
         COUT<< "no mass detected..."<<endl;
         mass_type_= NO_MASS;
-        mass_offset_=-1;
+        mass_offset_=0;
     }
 
 
@@ -511,27 +508,6 @@ bool Particles<part,part_info,part_dataType>::addParticle_global(part newPart)
       field_part_(x).parts.push_front(newPart);
       numParticles_ +=1;
       return true;
-    }
-  else
-    {
-      return false;
-    }
-} // modded version that assigns ID (to reduce read time)
-template <typename part, typename part_info, typename part_dataType>
-bool Particles<part,part_info,part_dataType>::addParticle_global(part newPart,bool assignID)
-{
-  Site x(lat_part_);
-  int coord[3];
-
-  this->getPartCoord(newPart,coord);
-
-  if(x.setCoord(coord))
-    {
-      //field_part_(x).size += 1;
-        newPart.ID = numParticles_;
-        field_part_(x).parts.push_front(newPart);
-        numParticles_ +=1;
-        return true;
     }
   else
     {
@@ -653,12 +629,12 @@ Real Particles<part,part_info,part_dataType>::updateVel(Real (*updateVel_funct)(
       }
       else if(reduce_type[i] & (MIN | MIN_LOCAL))
       {
-          output[i]= (double) 9223372036854775807;
+          output[i]=9223372036854775807;
           //COUT<<"min"<<endl;
       }
       else if(reduce_type[i] & (MAX | MAX_LOCAL))
       {
-          output[i]= (double) -9223372036854775807;
+          output[i]=-9223372036854775807;
           //COUT<<"max"<<endl;
       }
   }
@@ -775,7 +751,6 @@ Real Particles<part,part_info,part_dataType>::updateVel(Real (*updateVel_funct)(
 
     typename std::forward_list<part>::iterator it;
     double frac[3];
-    Real x0;
     Real maxvel = 0.;
     Real v2;
 
@@ -796,12 +771,12 @@ Real Particles<part,part_info,part_dataType>::updateVel(Real (*updateVel_funct)(
         }
         else if(reduce_type[i] & (MIN | MIN_LOCAL))
         {
-            output[i]=(double) 9223372036854775807;
+            output[i]=9223372036854775807;
             //COUT<<"min"<<endl;
         }
         else if(reduce_type[i] & (MAX | MAX_LOCAL))
         {
-            output[i]=(double) -9223372036854775807;
+            output[i]=-9223372036854775807;
             //COUT<<"max"<<endl;
         }
     }
@@ -966,12 +941,12 @@ void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(
           }
           else if(reduce_type[i] & (MIN | MIN_LOCAL))
           {
-              output[i]=(double) MAX_NUMBER;
+              output[i]=MAX_NUMBER;
               //COUT<<"min"<<endl;
           }
           else if(reduce_type[i] & (MAX | MAX_LOCAL))
           {
-              output[i]=-(double) MAX_NUMBER;
+              output[i]=-MAX_NUMBER;
               //COUT<<"max"<<endl;
           }
       }
@@ -1848,7 +1823,6 @@ void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(
 
     //part * pTemp;
 
-    long p;
     long bufferSize[6];
     long bufferSizeRec[6];
 
@@ -1880,12 +1854,12 @@ void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(
         }
         else if(reduce_type[i] & (MIN | MIN_LOCAL))
         {
-            output[i]=(double) MAX_NUMBER;
+            output[i]=MAX_NUMBER;
             //COUT<<"min"<<endl;
         }
         else if(reduce_type[i] & (MAX | MAX_LOCAL))
         {
-            output[i]=-(double) MAX_NUMBER;
+            output[i]=-MAX_NUMBER;
             //COUT<<"max"<<endl;
         }
     }
@@ -2135,7 +2109,6 @@ void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(
                         cout<< "particle position: "<< (*it) <<endl;
                         //cout<< "particle position old: "<< partTest <<endl;
                         cout<<"particle : "<<(*it).ID<< " "<< thisRanks[0]<<" , "<< thisRanks[1]<<" , "<< partRanks[0]<<" , "<< partRanks[1]<<endl;
-                        throw 1;
                     }
                     field_part_(x).parts.erase_after(prev);
                     it = prev;
@@ -2146,7 +2119,6 @@ void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(
                     cout<< "particle position: "<< (*it) <<endl;
                     //cout<< "particle position old: "<< partTest <<endl;
                     cout<<"particle : "<<(*it).ID<< " "<< thisRanks[0]<<" , "<< thisRanks[1]<<" , "<< partRanks[0]<<" , "<< partRanks[1]<<endl;
-                    throw 1;
                 }
 
             }
@@ -2821,8 +2793,6 @@ void Particles<part,part_info,part_dataType>::saveHDF5(string filename_base, int
     int numProcPerFileDim1 = parallel.grid_size()[1]/fileNumber;
     int whichFile  = parallel.grid_rank()[1] * fileNumber / parallel.grid_size()[1];
     //int rankInFile;
-    long numParts[numProcPerFile];
-    int ranksList[numProcPerFile];
     MPI_Comm fileComm;
     MPI_Group fileGroup;
     part * partlist;

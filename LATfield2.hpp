@@ -20,6 +20,7 @@
 
 #ifdef FFT3D
 #include "fftw3.h"
+#include "cufft.h"
 #endif
 
 
@@ -101,6 +102,7 @@ namespace LATfield2
         #include "LATfield2_Field.hpp"
         #ifdef FFT3D
             #include "LATfield2_PlanFFT.hpp"
+            #include "LATfield2_PlanFFT_decl.hpp"
         #endif
         #include "particles/LATfield2_Particles.hpp"
         #ifdef CATALAT

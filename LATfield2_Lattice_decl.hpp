@@ -107,7 +107,7 @@ public:
      \param direction : asked dimension.
      \return int. Global size of the sublattice (of this MPI process) in the given dimension.
      */
-    int  sizeLocal(int direction);  //Local version
+    __host__ __device__ int  sizeLocal(int direction);  //Local version
     
     
     /*!
@@ -132,7 +132,7 @@ public:
     /*!
      \return long. Array index of the first site which is not within the halo.
      */
-    long siteFirst();
+    __host__ __device__ long siteFirst();
     
     /*!
      \return long. Array index of the last site which is not within the halo.
@@ -146,7 +146,7 @@ public:
      \param direction : asked direction.
      \return long. Number of array elements to jump.
      */
-    long  jump(int direction);       //Number of sites jumped to move in direction
+    __host__ __device__ long  jump(int direction);       //Number of sites jumped to move in direction
     
     /*!
      \return long. Number of sites before first local site in lattice. Should not be used by users.
@@ -161,7 +161,7 @@ public:
     /*!
      \return *long. Pointer to an array which store the last 2 dimensions coordinate of the first local(in this MPI process) sites. Index 0 is for dim-1, index 1 is for dim-2/
      */
-    long*  coordSkip();              //Number to add to coord[dim_-1] to get global value
+    __host__ __device__ long*  coordSkip();              //Number to add to coord[dim_-1] to get global value
     
     /*!
      Function which save in serial and in ASCII the global and local description of the Lattice. Usefull to read a file writen by fast_save or fast_write methods of the Field class.

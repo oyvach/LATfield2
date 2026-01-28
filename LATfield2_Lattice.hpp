@@ -417,15 +417,15 @@ long  Lattice::sitesGross() { return sitesGross_; }
 int  Lattice::halo() { return halo_; }
 
 int* Lattice::sizeLocal() { return sizeLocal_; };
-int  Lattice::sizeLocal(int i) { return sizeLocal_[i]; }
+__host__ __device__ int  Lattice::sizeLocal(int i) { return sizeLocal_[i]; }
 long  Lattice::sitesLocal() { return sitesLocal_; }
 long  Lattice::sitesLocalGross() { return sitesLocalGross_; }
 
-long  Lattice::jump(int i) { return jump_[i]; }
+__host__ __device__ long  Lattice::jump(int i) { return jump_[i]; }
 long  Lattice::sitesSkip() { return sitesSkip_; }
 long  Lattice::sitesSkip2d() { return sitesSkip2d_; }
-long*  Lattice::coordSkip() { return coordSkip_; }
-long Lattice::siteFirst() { return siteFirst_; }
+__host__ __device__ long*  Lattice::coordSkip() { return coordSkip_; }
+__host__ __device__ long Lattice::siteFirst() { return siteFirst_; }
 long Lattice::siteLast() { return siteLast_; }
 
 int * Lattice::sizeLocalAllProcDim0(){ return sizeLocalAllProcDim0_; }

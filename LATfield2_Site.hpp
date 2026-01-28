@@ -10,23 +10,23 @@
 
 //CONSTRUCTORS===================
 
-Site::Site() {index_=0; lattice_ = NULL;}
-Site::Site(Lattice& lattice) { initialize(lattice); }
-Site::Site(Lattice& lattice, long index) { initialize(lattice, index); }
+__host__ __device__ Site::Site() {index_=0; lattice_ = NULL;}
+__host__ __device__ Site::Site(Lattice& lattice) { initialize(lattice); }
+__host__ __device__ Site::Site(Lattice& lattice, long index) { initialize(lattice, index); }
 
 //INITIALIZATION=================
 
-void Site::initialize(Lattice& lattice) { lattice_=&lattice; index_=0l;}
-void Site::initialize(Lattice& lattice, long index) { lattice_ = &lattice; index_ = index; }
+__host__ __device__ void Site::initialize(Lattice& lattice) { lattice_=&lattice; index_=0l;}
+__host__ __device__ void Site::initialize(Lattice& lattice, long index) { lattice_ = &lattice; index_ = index; }
 
 //NEIGHBOURING SITE OPERATORS==
 
-Site Site::operator+(int direction)
+__host__ __device__ Site Site::operator+(int direction)
 {
 	return Site( *lattice_, index_ + lattice_->jump(direction) );
 }
 
-Site Site::operator-(int direction)
+__host__ __device__ Site Site::operator-(int direction)
 {
 	return Site( *lattice_, index_ - lattice_->jump(direction) );
 }
@@ -121,18 +121,18 @@ void Site::indexAdvance(long number) { index_ += number; }
 
 //MISCELLANEOUS======================
 
-long Site::index() const { return index_; }
+__host__ __device__ long Site::index() const { return index_; }
 
 void Site::setIndex(long new_index) {index_ = new_index;}
 
-int Site::coord(int direction) ////////sensible a quelle dim est scatter (seul modif a faire ici)
+int Site::coord(int direction) const ////////sensible a quelle dim est scatter (seul modif a faire ici)
 {
 	if(direction<lattice_->dim()-2) { return coordLocal(direction); }
 	else if (direction==lattice_->dim()-2) {return coordLocal(direction)+lattice_->coordSkip()[1]; }
 	else {return coordLocal(direction)+lattice_->coordSkip()[0]; }
 }
 
-int Site::coordLocal(int direction)
+int Site::coordLocal(int direction) const
 {
 	if(direction==lattice_->dim()-1)
 	{
@@ -228,7 +228,7 @@ cKSite cKSite::operator-(int asked_direction)
 {
     return cKSite( *lattice_, index_ - lattice_->jump(directions_[asked_direction]));
 }
-int cKSite::coord(int asked_direction) ////////sensible a quelle dim est scatter (seul modif a faire ici)
+int cKSite::coord(int asked_direction) const ////////sensible a quelle dim est scatter (seul modif a faire ici)
 {
 	int direction= directions_[asked_direction] ;
 
@@ -237,7 +237,7 @@ int cKSite::coord(int asked_direction) ////////sensible a quelle dim est scatter
 	else {return latCoordLocal(direction)+lattice_->coordSkip()[0]; }
 }
 
-int cKSite::latCoord(int direction) ////////sensible a quelle dim est scatter (seul modif a faire ici)
+int cKSite::latCoord(int direction) const ////////sensible a quelle dim est scatter (seul modif a faire ici)
 {
 
 	if(direction<lattice_->dim()-2) { return coordLocal(direction); }
@@ -245,7 +245,7 @@ int cKSite::latCoord(int direction) ////////sensible a quelle dim est scatter (s
 	else {return coordLocal(direction)+lattice_->coordSkip()[0]; }
 }
 
-int cKSite::coordLocal(int asked_direction)
+int cKSite::coordLocal(int asked_direction) const
 {
 	int direction= directions_[asked_direction] ;
 
@@ -262,7 +262,7 @@ int cKSite::coordLocal(int asked_direction)
 		return (index_%lattice_->jump(direction+1)) / lattice_->jump(direction) - lattice_->halo();
 	}
 }
-int cKSite::latCoordLocal(int direction)
+int cKSite::latCoordLocal(int direction) const
 {
 
 	if(direction==lattice_->dim()-1)
@@ -328,7 +328,7 @@ rKSite rKSite::operator-(int asked_direction)
 {
     return rKSite( *lattice_, index_ - lattice_->jump(directions_[asked_direction]));
 }
-int rKSite::coord(int asked_direction) ////////sensible a quelle dim est scatter (seul modif a faire ici)
+int rKSite::coord(int asked_direction) const ////////sensible a quelle dim est scatter (seul modif a faire ici)
 {
 	int direction= directions_[asked_direction] ;
 
@@ -337,7 +337,7 @@ int rKSite::coord(int asked_direction) ////////sensible a quelle dim est scatter
 	else {return latCoordLocal(direction)+lattice_->coordSkip()[0]; }
 }
 
-int rKSite::latCoord(int direction) ////////sensible a quelle dim est scatter (seul modif a faire ici)
+int rKSite::latCoord(int direction) const ////////sensible a quelle dim est scatter (seul modif a faire ici)
 {
 
 	if(direction<lattice_->dim()-2) { return coordLocal(direction); }
@@ -345,7 +345,7 @@ int rKSite::latCoord(int direction) ////////sensible a quelle dim est scatter (s
 	else {return coordLocal(direction)+lattice_->coordSkip()[0]; }
 }
 
-int rKSite::coordLocal(int asked_direction)
+int rKSite::coordLocal(int asked_direction) const
 {
 	int direction= directions_[asked_direction] ;
 
@@ -362,7 +362,7 @@ int rKSite::coordLocal(int asked_direction)
 		return (index_%lattice_->jump(direction+1)) / lattice_->jump(direction) - lattice_->halo();
 	}
 }
-int rKSite::latCoordLocal(int direction)
+int rKSite::latCoordLocal(int direction) const
 {
 
 	if(direction==lattice_->dim()-1)

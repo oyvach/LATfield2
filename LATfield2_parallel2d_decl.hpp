@@ -19,6 +19,14 @@
 #include "mpi.h"
 #define COUT if(parallel.isRoot())cout
 
+#ifdef FFT3D
+namespace LATfield2
+{
+  #include "LATfield2_PlanFFT.hpp"
+  extern  temporaryMemFFT tempMemory;
+}
+#endif
+
 
 /*! \class Parallel2d
  \brief LATfield2d underliying class for paralleization
@@ -62,6 +70,15 @@ class Parallel2d{
    \param proc_size1 : size of the second dimension of the MPI process grid.
    */
   void initialize(int proc_size0, int proc_size1);
+
+  void finalize()
+  {
+#ifdef FFT3D
+    LATfield2::tempMemory.clear();
+#endif
+    if(!neverFinalizeMPI) MPI_Finalize();
+    neverFinalizeMPI = true;
+  }
 
   //ABORT AND BARRIER===============================
 
