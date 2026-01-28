@@ -616,11 +616,11 @@ void Field<FieldType>::get_h5type()
 	{
         type_id_ = H5Tcreate (H5T_COMPOUND, sizeof (Imag));
 #ifdef SINGLE
-        H5Tinsert (type_id_, "real", 0,H5T_NATIVE_FLOAT);
-        H5Tinsert (type_id_, "imaginary", sizeof(Real),H5T_NATIVE_FLOAT);
+	H5Tinsert (type_id_, "real", 0,H5T_NATIVE_FLOAT);
+	H5Tinsert (type_id_, "imaginary", sizeof(Real),H5T_NATIVE_FLOAT);
 #else
-	    H5Tinsert (type_id_, "real", 0,H5T_NATIVE_DOUBLE);
-        H5Tinsert (type_id_, "imaginary", sizeof(Real),H5T_NATIVE_DOUBLE);
+	H5Tinsert (type_id_, "real", 0,H5T_NATIVE_DOUBLE);
+	H5Tinsert (type_id_, "imaginary", sizeof(Real),H5T_NATIVE_DOUBLE);
 #endif
     }
     else if (type_name[nt+12]=='p' && type_name[nt+13]=='a' && type_name[nt+14]=='r' && type_name[nt+15]=='t' &&
@@ -1090,6 +1090,12 @@ void Field<FieldType>::updateHaloComms()
 
 	auto success = cudaPointerGetAttributes(&attributes, data_);
 
+	bool use_device_copy = (attributes.type != cudaMemoryTypeHost);
+#ifndef GH
+	// On non-GH platforms avoid launching device kernels on host buffers.
+	use_device_copy = false;
+#endif
+
 	if (success != cudaSuccess)
 	{
 		cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot get pointer attributes." << endl;
@@ -1120,7 +1126,7 @@ void Field<FieldType>::updateHaloComms()
 
 	if(parallel.grid_rank()[1]%2==0)
 	{
-		if (attributes.type == cudaMemoryTypeHost)
+		if (!use_device_copy)
 		{
 			nvtxRangePushA("copy halo values (host)");
 			#pragma omp parallel for collapse(2)
@@ -1155,7 +1161,7 @@ void Field<FieldType>::updateHaloComms()
 		}
 		nvtxRangePop();
 
-		if (attributes.type != cudaMemoryTypeHost) // offload next send buffer copy
+		if (use_device_copy) // offload next send buffer copy
 		{
 			copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(pointer_send_down, buffer_send, lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
 		}
@@ -1167,7 +1173,7 @@ void Field<FieldType>::updateHaloComms()
 		}
 		nvtxRangePop();
 
-		if (attributes.type == cudaMemoryTypeHost)
+		if (!use_device_copy)
 		{
 			nvtxRangePushA("copy halo values (host)");
 			#pragma omp parallel for collapse(2)
@@ -1216,7 +1222,7 @@ void Field<FieldType>::updateHaloComms()
 		}
 		nvtxRangePop();
 
-		if (attributes.type != cudaMemoryTypeHost)
+		if (use_device_copy)
 		{
 			success = cudaDeviceSynchronize(); // finalize receive buffer copy
 
@@ -1238,7 +1244,7 @@ void Field<FieldType>::updateHaloComms()
 		}
 		nvtxRangePop();
 
-		if (attributes.type == cudaMemoryTypeHost)
+		if (!use_device_copy)
 		{
 			nvtxRangePushA("copy halo values (host)");
 			#pragma omp parallel for collapse(2)
@@ -1268,7 +1274,7 @@ void Field<FieldType>::updateHaloComms()
 	}
 	else
 	{
-		if (attributes.type == cudaMemoryTypeHost)
+		if (!use_device_copy)
 		{
 			nvtxRangePushA("copy halo values (host)");
 			#pragma omp parallel for collapse(2)
@@ -1291,7 +1297,7 @@ void Field<FieldType>::updateHaloComms()
 		parallel.receive_dim1( buffer_rec, buffer_size1, parallel.grid_rank()[1]-1);
 		nvtxRangePop();
 
-		if (attributes.type != cudaMemoryTypeHost)
+		if (use_device_copy)
 		{
 			nvtxRangePushA("copy halo values (device)");
 			success = cudaDeviceSynchronize(); // finalize send buffer copy
@@ -1311,7 +1317,7 @@ void Field<FieldType>::updateHaloComms()
 		parallel.send_dim1( buffer_send, buffer_size1, parallel.grid_rank()[1]-1);
 		nvtxRangePop();
 
-		if (attributes.type == cudaMemoryTypeHost)
+		if (!use_device_copy)
 		{
 			nvtxRangePushA("copy halo values (host)");
 			#pragma omp parallel for collapse(2)
@@ -1360,7 +1366,7 @@ void Field<FieldType>::updateHaloComms()
 		}
 		nvtxRangePop();
 
-		if (attributes.type != cudaMemoryTypeHost)
+		if (use_device_copy)
 		{
 			nvtxRangePushA("copy halo values (device)");
 			success = cudaDeviceSynchronize(); // finalize send buffer copy
@@ -1387,7 +1393,7 @@ void Field<FieldType>::updateHaloComms()
 		}
 		nvtxRangePop();
 
-		if (attributes.type == cudaMemoryTypeHost)
+		if (!use_device_copy)
 		{
 			nvtxRangePushA("copy halo values (host)");
 			#pragma omp parallel for collapse(2)
@@ -1419,7 +1425,7 @@ void Field<FieldType>::updateHaloComms()
 	{
 		if(parallel.grid_rank()[1]==0)
 		{
-			if (attributes.type == cudaMemoryTypeHost)
+			if (!use_device_copy)
 			{
 				nvtxRangePushA("copy halo values (host)");
 				#pragma omp parallel for collapse(2)
@@ -1456,7 +1462,7 @@ void Field<FieldType>::updateHaloComms()
 			parallel.receive_dim1( buffer_rec, buffer_size1,  parallel.grid_size()[1]-1);
 			nvtxRangePop();
 
-			if (attributes.type == cudaMemoryTypeHost)
+			if (!use_device_copy)
 			{
 				nvtxRangePushA("copy halo values (host)");
 				#pragma omp parallel for collapse(2)
@@ -1486,7 +1492,7 @@ void Field<FieldType>::updateHaloComms()
 		}
 		if(parallel.grid_rank()[1]==parallel.grid_size()[1]-1)
 		{
-			if (attributes.type == cudaMemoryTypeHost)
+			if (!use_device_copy)
 			{
 				nvtxRangePushA("copy halo values (host)");
 				#pragma omp parallel for collapse(2)
@@ -1509,7 +1515,7 @@ void Field<FieldType>::updateHaloComms()
 			parallel.receive_dim1( buffer_rec, buffer_size1,0);
 			nvtxRangePop();
 
-			if (attributes.type != cudaMemoryTypeHost)
+			if (use_device_copy)
 			{
 				nvtxRangePushA("copy halo values (device)");
 				success = cudaDeviceSynchronize(); // finalize send buffer copy
@@ -1529,7 +1535,7 @@ void Field<FieldType>::updateHaloComms()
 			parallel.send_dim1( buffer_send, buffer_size1, 0);
 			nvtxRangePop();
 
-			if (attributes.type == cudaMemoryTypeHost)
+			if (!use_device_copy)
 			{
 				nvtxRangePushA("copy halo values (host)");
 				#pragma omp parallel for collapse(2)
@@ -1568,7 +1574,7 @@ void Field<FieldType>::updateHaloComms()
 	{
 		if(parallel.grid_rank()[0]!=parallel.grid_size()[0]-1)
 		{
-			if (attributes.type != cudaMemoryTypeHost) // can't just send/rec into the data array, use send/rec buffers
+			if (use_device_copy) // can't just send/rec into the data array, use send/rec buffers
 			{
 				nvtxRangePushA("copy halo values (device)");
 				copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(pointer_send_up, buffer_send, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
@@ -1591,7 +1597,7 @@ void Field<FieldType>::updateHaloComms()
 			parallel.receive_dim0( pointer_rec_up, buffer_size0, parallel.grid_rank()[0]+1);
 			nvtxRangePop();
 
-			if (attributes.type != cudaMemoryTypeHost) // can't just send/rec into the data array, use send/rec buffers
+			if (use_device_copy) // can't just send/rec into the data array, use send/rec buffers
 			{
 				nvtxRangePushA("copy halo values (device)");
 				pointer_rec_up = data_ + lattice_->sitesLocalGross() * components_ - buffer_size0;
@@ -1609,7 +1615,7 @@ void Field<FieldType>::updateHaloComms()
 			}
 		}
 
-		if (attributes.type != cudaMemoryTypeHost && (parallel.grid_rank()[0] != 0 || parallel.grid_size()[0]%2==0))
+		if (use_device_copy && (parallel.grid_rank()[0] != 0 || parallel.grid_size()[0]%2==0))
 		{
 			nvtxRangePushA("copy halo values (device)");
 			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(pointer_send_down, buffer_send, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
@@ -1642,7 +1648,7 @@ void Field<FieldType>::updateHaloComms()
 			nvtxRangePop();
 		}
 
-		if (attributes.type != cudaMemoryTypeHost && (parallel.grid_rank()[0] != 0 || parallel.grid_size()[0]%2==0))
+		if (use_device_copy && (parallel.grid_rank()[0] != 0 || parallel.grid_size()[0]%2==0))
 		{
 			nvtxRangePushA("copy halo values (device)");
 			pointer_rec_down = data_;
@@ -1661,7 +1667,7 @@ void Field<FieldType>::updateHaloComms()
 	}
 	else
 	{
-		if (attributes.type != cudaMemoryTypeHost)
+		if (use_device_copy)
 		{
 			nvtxRangePushA("receive halo values");
 			parallel.receive_dim0( buffer_rec, buffer_size0, parallel.grid_rank()[0]-1);
@@ -1694,7 +1700,7 @@ void Field<FieldType>::updateHaloComms()
 		parallel.send_dim0( pointer_send_down, buffer_size0, parallel.grid_rank()[0]-1);
 		nvtxRangePop();
 
-		if (attributes.type != cudaMemoryTypeHost)
+		if (use_device_copy)
 		{
 			nvtxRangePushA("copy halo values (device)");
 			pointer_send_down = data_ + buffer_size0;
@@ -1727,7 +1733,7 @@ void Field<FieldType>::updateHaloComms()
 		}
 		nvtxRangePop();
 
-		if (attributes.type != cudaMemoryTypeHost)
+		if (use_device_copy)
 		{
 			nvtxRangePushA("copy halo values (device)");
 			pointer_send_up = data_ + lattice_->sitesLocalGross() * components_ - 2*buffer_size0;
@@ -1750,7 +1756,7 @@ void Field<FieldType>::updateHaloComms()
 	{
 		if(parallel.grid_rank()[0]==0)
 		{
-			if (attributes.type != cudaMemoryTypeHost)
+			if (use_device_copy)
 			{
 				nvtxRangePushA("copy halo values (device)");
 				copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(pointer_send_down, buffer_send, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
@@ -1773,7 +1779,7 @@ void Field<FieldType>::updateHaloComms()
 			parallel.receive_dim0( pointer_rec_down, buffer_size0,  parallel.grid_size()[0]-1);
 			nvtxRangePop();
 
-			if (attributes.type != cudaMemoryTypeHost)
+			if (use_device_copy)
 			{
 				nvtxRangePushA("copy halo values (device)");
 				pointer_rec_down = data_;
@@ -1792,7 +1798,7 @@ void Field<FieldType>::updateHaloComms()
 		}
 		if(parallel.grid_rank()[0]==parallel.grid_size()[0]-1)
 		{
-			if (attributes.type != cudaMemoryTypeHost)
+			if (use_device_copy)
 			{
 				nvtxRangePushA("copy halo values (device)");
 				copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(pointer_send_up, buffer_send, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
@@ -1815,7 +1821,7 @@ void Field<FieldType>::updateHaloComms()
 			parallel.send_dim0( pointer_send_up, buffer_size0, 0);
 			nvtxRangePop();
 
-			if (attributes.type != cudaMemoryTypeHost)
+			if (use_device_copy)
 			{
 				nvtxRangePushA("copy halo values (device)");
 				pointer_rec_up = data_ + lattice_->sitesLocalGross() * components_ - buffer_size0;
