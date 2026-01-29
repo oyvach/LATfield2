@@ -2,6 +2,7 @@
 #define LATFIELD2_PERFPARTICLES_HPP
 
 #include <algorithm>
+#include <cstdlib>
 
 #include <thrust/sort.h>
 #include <thrust/binary_search.h>
@@ -43,6 +44,16 @@ struct tripleReal
     Real y;
     Real z;
 };
+
+// forward declarations for non-GH debug helpers
+#ifndef GH
+template <typename part, typename part_info>
+class perfParticles;
+
+struct RowCheckResult;
+template <typename part, typename part_info>
+__global__ void check_row_buffers(perfParticles<part, part_info> * pcl, RowCheckResult * res);
+#endif
 
 // cuda_realloc function to reallocate memory on device
 template <typename T>
@@ -396,6 +407,11 @@ class perfParticles
 
         template <typename part2, typename part_info2>
         friend __global__ void project_particles(perfParticles<part2, part_info2> * pcl, Real * target, int projection_order, long start_idx, const long * jump, int stencil_k);
+
+    #ifndef GH
+        template <typename part2, typename part_info2>
+        friend __global__ void check_row_buffers(perfParticles<part2, part_info2> * pcl, RowCheckResult * res);
+    #endif
 };
 
 
@@ -765,6 +781,20 @@ __global__ void reorder_data(perfParticles<part, part_info> * pcl, unsigned long
 template <typename part, typename part_info>
 void perfParticles<part, part_info>::prepareComm(unsigned long long int * send_begin, uint32_t ** d_keys, void ** d_temp, cudaStream_t & stream)
 {
+    unsigned long long int * send_begin_dev = send_begin;
+#ifndef GH
+    unsigned long long int * send_begin_tmp = nullptr;
+    if (send_begin != nullptr)
+    {
+        auto err = cudaMallocAsync(&send_begin_tmp, 10 * sizeof(unsigned long long int), stream);
+        if (err != cudaSuccess)
+        {
+            std::cerr << "CUDA malloc failed: " << cudaGetErrorString(err) << std::endl;
+            throw std::runtime_error("Error allocating device buffer for send_begin in prepareComm");
+        }
+        send_begin_dev = send_begin_tmp;
+    }
+#endif
     uint32_t * d_keys_in = nullptr;
     unsigned long long int * d_indices_in = nullptr;
     unsigned long long int * d_indices_out = nullptr;
@@ -832,7 +862,7 @@ void perfParticles<part, part_info>::prepareComm(unsigned long long int * send_b
 
     nvtxRangePushA("prepareComm: update pointers");
 
-    update_pointers<<<(num_row_buffers_+137)/128, 128, 0, stream>>>(this, send_begin);
+    update_pointers<<<(num_row_buffers_+137)/128, 128, 0, stream>>>(this, send_begin_dev);
 
     success = cudaStreamSynchronize(stream);
     if (success != cudaSuccess)
@@ -840,6 +870,20 @@ void perfParticles<part, part_info>::prepareComm(unsigned long long int * send_b
         std::cerr << "CUDA kernel failed: " << cudaGetErrorString(success) << std::endl;
         throw std::runtime_error("Error in CUDA kernel update_pointers");
     }
+
+#ifndef GH
+    if (send_begin_tmp != nullptr)
+    {
+        auto err = cudaMemcpyAsync(send_begin, send_begin_tmp, 10 * sizeof(unsigned long long int), cudaMemcpyDeviceToHost, stream);
+        if (err != cudaSuccess)
+        {
+            std::cerr << "CUDA memcpy failed: " << cudaGetErrorString(err) << std::endl;
+            throw std::runtime_error("Error copying send_begin from device in prepareComm");
+        }
+        cudaFreeAsync(send_begin_tmp, stream);
+        cudaStreamSynchronize(stream);
+    }
+#endif
     nvtxRangePop();
 
     rows_sorted_ = false;
@@ -984,21 +1028,136 @@ void perfParticles<part, part_info>::reorderParticles(unsigned long long int * d
     nvtxRangePop();
 }
 
+// Debug helper to validate row buffers on device (non-GH only, opt-in via ENABLE_ROW_CHECKS)
+#ifndef GH
+#ifdef ENABLE_ROW_CHECKS
+struct RowCheckResult
+{
+    int row;
+    int code;
+    int start;
+    int count;
+};
+
+template <typename part, typename part_info>
+__global__ void check_row_buffers(perfParticles<part, part_info> * pcl, RowCheckResult * res)
+{
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (pcl == nullptr || res == nullptr)
+    {
+        return;
+    }
+
+    if (res->code != 0)
+    {
+        return;
+    }
+
+    if (pcl->row_buffers_ == nullptr)
+    {
+        res->row = -1;
+        res->code = 4; // row_buffers_ null
+        res->start = 0;
+        res->count = 0;
+        return;
+    }
+
+    if (row >= pcl->num_row_buffers_)
+    {
+        return;
+    }
+
+    auto rb = pcl->row_buffers_[row];
+
+    if (rb.p == nullptr || rb.q == nullptr || rb.other == nullptr)
+    {
+        res->row = row;
+        res->code = 1; // null pointer
+        return;
+    }
+
+    int start = static_cast<int>((rb.p - pcl->p) / 3);
+    if (start < 0 || start > pcl->num_particles_)
+    {
+        res->row = row;
+        res->code = 2; // start out of range
+        res->start = start;
+        res->count = rb.count;
+        return;
+    }
+
+    if (rb.count < 0 || start + rb.count > pcl->num_particles_)
+    {
+        res->row = row;
+        res->code = 3; // count out of range
+        res->start = start;
+        res->count = rb.count;
+        return;
+    }
+}
+#endif
+#endif
+
 // update row buffers
 template <typename part, typename part_info>
 void perfParticles<part, part_info>::updateRowBuffers(unsigned long long int * send_begin)
 {
-#ifndef DEBUG_RADIX_SORT
-    uint32_t * d_keys_in = nullptr;
-    unsigned long long int * d_indices = nullptr;
-    void * d_temp = nullptr;
-    cudaStream_t pcl_stream;
-
-    auto success = cudaStreamCreateWithFlags(&pcl_stream, cudaStreamNonBlocking);
-    if (success != cudaSuccess)
+    // If no particles, still refresh row buffers (non-GH) without launching device kernels
+#ifndef GH
+    if (num_particles_ == 0)
     {
-        std::cerr << "CUDA stream creation failed: " << cudaGetErrorString(success) << std::endl;
-        throw std::runtime_error("Error in CUDA stream creation for moveParticles");
+        nvtxRangePushA("updateRowBuffers: empty fastpath");
+
+        // populate row buffers on host and copy down
+        auto * host_rb = (row_buffer<Real, Real, long> *) malloc(num_row_buffers_ * sizeof(row_buffer<Real, Real, long>));
+        if (host_rb == nullptr)
+        {
+            throw std::runtime_error("Failed to allocate host row buffer array (empty)");
+        }
+
+        for (uint32_t r = 0; r < num_row_buffers_; ++r)
+        {
+            host_rb[r].p = p;
+            host_rb[r].q = q;
+            host_rb[r].other = other;
+            host_rb[r].count = 0;
+            host_rb[r].capacity = -1;
+            host_rb[r].sorted = true;
+        }
+
+        auto copy_err = cudaMemcpy(row_buffers_, host_rb, num_row_buffers_ * sizeof(row_buffer<Real, Real, long>), cudaMemcpyHostToDevice);
+        free(host_rb);
+        if (copy_err != cudaSuccess)
+        {
+            std::cerr << "cudaMemcpy failed: " << cudaGetErrorString(copy_err) << std::endl;
+            throw std::runtime_error("Error copying row buffers for empty case");
+        }
+
+        if (send_begin != nullptr)
+        {
+            unsigned long long zeros[10] = {0};
+            std::copy(zeros, zeros + 10, send_begin);
+        }
+
+        rows_sorted_ = true;
+        nvtxRangePop();
+        return;
+    }
+#endif
+
+    unsigned long long int * send_begin_tmp = nullptr;
+    unsigned long long int * send_begin_dev = send_begin;
+#ifndef GH
+    if (send_begin != nullptr)
+    {
+        auto err = cudaMalloc(&send_begin_tmp, 10 * sizeof(unsigned long long int));
+        if (err != cudaSuccess)
+        {
+            std::cerr << "cudaMalloc failed: " << cudaGetErrorString(err) << std::endl;
+            throw std::runtime_error("Error allocating device buffer for send_begin");
+        }
+        send_begin_dev = send_begin_tmp; // kernel will fill device buffer
     }
 #endif
 
@@ -1010,33 +1169,19 @@ void perfParticles<part, part_info>::updateRowBuffers(unsigned long long int * s
     nvtxRangePop();
 
     nvtxRangePushA("updateRowBuffers: sort");
- #ifdef DEBUG_RADIX_SORT
-    // tuple-pointer to particle properties
-    tripleReal * pos = (tripleReal *) p;
-    tripleReal * vel = (tripleReal *) q;
+#ifdef GH
+    uint32_t * d_keys_in = nullptr;
+    unsigned long long int * d_indices = nullptr;
+    void * d_temp = nullptr;
+    cudaStream_t pcl_stream;
 
-    // create zip iterator from tuples
-    auto zip_begin = thrust::make_zip_iterator(thrust::make_tuple(pos, vel, other));
-    auto zip_end = thrust::make_zip_iterator(thrust::make_tuple(pos + num_particles_, vel + num_particles_, other + num_particles_));
+    auto success = cudaStreamCreateWithFlags(&pcl_stream, cudaStreamNonBlocking);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA stream creation failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA stream creation for moveParticles");
+    }
 
-    using zip_iter = typename decltype(zip_begin)::value_type;
-
-    // sort particles
-    thrust::sort(thrust::device, zip_begin, zip_end, [this] __device__ (zip_iter a, zip_iter b) {
-        auto pos_a = thrust::get<0>(a);
-        auto pos_b = thrust::get<0>(b);
-
-        int row_a = computeRow(((Real *) (&pos_a))[1], ((Real *) (&pos_a))[2]);
-        int row_b = computeRow(((Real *) (&pos_b))[1], ((Real *) (&pos_b))[2]);
-
-        if (row_a == row_b)
-        {
-            return ((Real *) (&pos_a))[0] < ((Real *) (&pos_b))[0];
-        }
-
-        return row_a < row_b;
-    });
-#else
     success = cudaMallocAsync(&d_keys_in, num_particles_ * sizeof(uint32_t), pcl_stream);
     if (success != cudaSuccess)
     {
@@ -1068,12 +1213,126 @@ void perfParticles<part, part_info>::updateRowBuffers(unsigned long long int * s
     }
 
     cudaStreamDestroy(pcl_stream);
-#endif
+#else
+#ifdef DEBUG_RADIX_SORT
+    // Debug path only for non-GH: deterministic sort-by-key on rows, then reorder
+    uint32_t * d_keys_in = nullptr;
+    unsigned long long int * d_indices = nullptr;
+    void * d_temp = nullptr;
+    cudaStream_t dbg_stream;
+
+    auto success = cudaStreamCreateWithFlags(&dbg_stream, cudaStreamNonBlocking);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA stream creation failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA stream creation for DEBUG_RADIX_SORT");
+    }
+
+    success = cudaMallocAsync(&d_keys_in, num_particles_ * sizeof(uint32_t), dbg_stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA malloc for d_keys_in (DEBUG_RADIX_SORT)");
+    }
+
+    success = cudaMallocAsync(&d_indices, num_particles_ * sizeof(unsigned long long int), dbg_stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA malloc for d_indices (DEBUG_RADIX_SORT)");
+    }
+
+    success = cudaMallocAsync(&d_temp, num_particles_ * 3 * sizeof(Real), dbg_stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA malloc for d_temp (DEBUG_RADIX_SORT)");
+    }
+
+    compute_rows<<<(num_particles_+127)/128, 128, 0, dbg_stream>>>(this, d_keys_in);
+
+    auto err = cudaGetLastError();
+    if (err != cudaSuccess)
+    {
+        std::cerr << "compute_rows failed: " << cudaGetErrorString(err) << std::endl;
+        throw std::runtime_error("Error in compute_rows (DEBUG_RADIX_SORT)");
+    }
+
+    thrust::sequence(thrust::cuda::par.on(dbg_stream), d_indices, d_indices + num_particles_, 0);
+    thrust::sort_by_key(thrust::cuda::par.on(dbg_stream), d_keys_in, d_keys_in + num_particles_, d_indices);
+
+    err = cudaGetLastError();
+    if (err != cudaSuccess)
+    {
+        std::cerr << "thrust::sort_by_key failed: " << cudaGetErrorString(err) << std::endl;
+        throw std::runtime_error("Error in thrust sort (DEBUG_RADIX_SORT)");
+    }
+
+    reorderParticles(d_indices, d_temp, dbg_stream);
+
+    cudaFreeAsync(d_temp, dbg_stream);
+    cudaFreeAsync(d_indices, dbg_stream);
+    cudaFreeAsync(d_keys_in, dbg_stream);
+
+    auto success_dbg = cudaStreamSynchronize(dbg_stream);
+    if (success_dbg != cudaSuccess)
+    {
+        std::cerr << "CUDA kernel failed: " << cudaGetErrorString(success_dbg) << std::endl;
+        throw std::runtime_error("Error in DEBUG_RADIX_SORT sort/reorder path");
+    }
+
+    cudaStreamDestroy(dbg_stream);
+#else
+    uint32_t * d_keys_in = nullptr;
+    unsigned long long int * d_indices = nullptr;
+    void * d_temp = nullptr;
+    cudaStream_t pcl_stream;
+
+    auto success = cudaStreamCreateWithFlags(&pcl_stream, cudaStreamNonBlocking);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA stream creation failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA stream creation for moveParticles");
+    }
+
+    success = cudaMallocAsync(&d_keys_in, num_particles_ * sizeof(uint32_t), pcl_stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA malloc for d_keys_in");
+    }
+
+    success = cudaMallocAsync(&d_indices, num_particles_ * sizeof(unsigned long long int) * 2L, pcl_stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA malloc for d_indices");
+    }
+
+    compute_rows<<<(num_particles_+127)/128, 128, 0, pcl_stream>>>(this, d_keys_in);
+
+    computeSortIndices(d_keys_in, d_indices, &d_temp, pcl_stream);
+
+    reorderParticles(d_indices, d_temp, pcl_stream);
+
+    cudaFreeAsync(d_temp, pcl_stream);
+    cudaFreeAsync(d_indices, pcl_stream);
+
+    success = cudaStreamSynchronize(pcl_stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA kernel failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA kernel reorder_data");
+    }
+
+    cudaStreamDestroy(pcl_stream);
+#endif // DEBUG_RADIX_SORT
+#endif // GH
     nvtxRangePop();
 
     nvtxRangePushA("updateRowBuffers: update pointers");
 
-    update_pointers<<<(num_row_buffers_+137)/128, 128>>>(this, send_begin);
+    update_pointers<<<(num_row_buffers_+137)/128, 128>>>(this, send_begin_dev);
 
     auto success2 = cudaDeviceSynchronize();
 
@@ -1082,6 +1341,19 @@ void perfParticles<part, part_info>::updateRowBuffers(unsigned long long int * s
         std::cerr << "CUDA kernel failed: " << cudaGetErrorString(success2) << std::endl;
         throw std::runtime_error("Error in CUDA kernel update_pointers");
     }
+
+#ifndef GH
+    if (send_begin_tmp != nullptr)
+    {
+        auto err = cudaMemcpy(send_begin, send_begin_tmp, 10 * sizeof(unsigned long long int), cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess)
+        {
+            std::cerr << "cudaMemcpy failed: " << cudaGetErrorString(err) << std::endl;
+            throw std::runtime_error("Error copying send_begin from device");
+        }
+        cudaFree(send_begin_tmp);
+    }
+#endif
 
     nvtxRangePop();
 
@@ -1236,7 +1508,257 @@ void perfParticles<part, part_info>::updateParticles(UpdateFunct update_funct, d
 
     Real v2 = Real(0);
 
-    update_particles<<<num_row_buffers_, 128>>>(this, update_funct, dtau, fields, nfields, params, output, reduce_type, noutput, &v2, copyout);
+    // Ensure output/reduce_type are on device; if host pointers are passed, stage through device buffers
+    double * output_dev = output;
+    int * reduce_type_dev = reduce_type;
+    bool output_dev_owned = false;
+    bool reduce_type_dev_owned = false;
+
+    if (noutput > 0)
+    {
+        cudaPointerAttributes attr{};
+
+        if (output != nullptr)
+        {
+            auto out_attr = cudaPointerGetAttributes(&attr, output);
+            if (out_attr != cudaSuccess || attr.type != cudaMemoryTypeDevice)
+            {
+                auto alloc_out = cudaMalloc(&output_dev, noutput * sizeof(double));
+                if (alloc_out != cudaSuccess)
+                {
+                    throw std::runtime_error("Failed to allocate device buffer for output");
+                }
+                auto copy_out = cudaMemcpy(output_dev, output, noutput * sizeof(double), cudaMemcpyHostToDevice);
+                if (copy_out != cudaSuccess)
+                {
+                    cudaFree(output_dev);
+                    throw std::runtime_error("Failed to copy output to device buffer");
+                }
+                output_dev_owned = true;
+            }
+        }
+
+        if (reduce_type != nullptr)
+        {
+            auto red_attr = cudaPointerGetAttributes(&attr, reduce_type);
+            if (red_attr != cudaSuccess || attr.type != cudaMemoryTypeDevice)
+            {
+                auto alloc_rt = cudaMalloc(&reduce_type_dev, noutput * sizeof(int));
+                if (alloc_rt != cudaSuccess)
+                {
+                    if (output_dev_owned) cudaFree(output_dev);
+                    throw std::runtime_error("Failed to allocate device buffer for reduce_type");
+                }
+                auto copy_rt = cudaMemcpy(reduce_type_dev, reduce_type, noutput * sizeof(int), cudaMemcpyHostToDevice);
+                if (copy_rt != cudaSuccess)
+                {
+                    cudaFree(reduce_type_dev);
+                    if (output_dev_owned) cudaFree(output_dev);
+                    throw std::runtime_error("Failed to copy reduce_type to device buffer");
+                }
+                reduce_type_dev_owned = true;
+            }
+        }
+    }
+
+#ifndef GH
+    // Ensure row buffers are populated before any validation or updates
+    bool need_rows = !rows_sorted_;
+    if (!need_rows)
+    {
+        if (row_buffers_ == nullptr)
+        {
+            need_rows = true;
+        }
+        else
+        {
+            row_buffer<Real, Real, long> rb0{};
+            auto copy_rb0 = cudaMemcpy(&rb0, row_buffers_, sizeof(row_buffer<Real, Real, long>), cudaMemcpyDeviceToHost);
+            if (copy_rb0 != cudaSuccess || rb0.p == nullptr || rb0.q == nullptr || rb0.other == nullptr)
+            {
+                need_rows = true;
+            }
+        }
+    }
+
+    if (need_rows)
+    {
+        updateRowBuffers(nullptr);
+
+        // Re-check after updateRowBuffers
+        if (row_buffers_ == nullptr)
+        {
+            throw std::runtime_error("row_buffers_ is null after updateRowBuffers");
+        }
+        row_buffer<Real, Real, long> rb0{};
+        auto copy_rb0 = cudaMemcpy(&rb0, row_buffers_, sizeof(row_buffer<Real, Real, long>), cudaMemcpyDeviceToHost);
+        if (copy_rb0 != cudaSuccess || rb0.p == nullptr || rb0.q == nullptr || rb0.other == nullptr)
+        {
+            throw std::runtime_error("Row buffer 0 is null after updateRowBuffers");
+        }
+    }
+
+    // Host-validate all row buffers before launching the kernel to catch bad pointers/counts early
+    {
+        row_buffer<Real, Real, long> * host_rb = (row_buffer<Real, Real, long> *) malloc(num_row_buffers_ * sizeof(row_buffer<Real, Real, long>));
+        if (host_rb == nullptr)
+        {
+            throw std::runtime_error("Failed to allocate host buffer for pre-kernel row validation");
+        }
+
+        auto copy = cudaMemcpy(host_rb, row_buffers_, num_row_buffers_ * sizeof(row_buffer<Real, Real, long>), cudaMemcpyDeviceToHost);
+        if (copy != cudaSuccess)
+        {
+            free(host_rb);
+            throw std::runtime_error("Failed to copy row buffers for pre-kernel validation");
+        }
+
+        long expected_start = 0;
+        long total = 0;
+        for (uint32_t r = 0; r < num_row_buffers_; ++r)
+        {
+            const auto & rb = host_rb[r];
+
+            if (rb.p == nullptr || rb.q == nullptr || rb.other == nullptr)
+            {
+                free(host_rb);
+                std::cerr << "Row buffer null pointer at row " << r << std::endl;
+                throw std::runtime_error("Row buffer validation failed before update_particles (pre-kernel)");
+            }
+
+            auto start = static_cast<long>((rb.p - p) / 3);
+            if (start < 0 || start > static_cast<long>(num_particles_))
+            {
+                free(host_rb);
+                std::cerr << "Row buffer start out of range at row " << r << " start=" << start << " count=" << rb.count << std::endl;
+                throw std::runtime_error("Row buffer validation failed before update_particles (pre-kernel)");
+            }
+
+            auto end = start + rb.count;
+            if (rb.count < 0 || end > static_cast<long>(num_particles_))
+            {
+                free(host_rb);
+                std::cerr << "Row buffer count out of range at row " << r << " start=" << start << " end=" << end << " num_particles=" << num_particles_ << std::endl;
+                throw std::runtime_error("Row buffer validation failed before update_particles (pre-kernel)");
+            }
+
+            if (start != expected_start)
+            {
+                free(host_rb);
+                std::cerr << "Row buffer start mismatch at row " << r << " expected_start=" << expected_start << " actual=" << start << " count=" << rb.count << std::endl;
+                throw std::runtime_error("Row buffer validation failed before update_particles (pre-kernel)");
+            }
+
+            expected_start = end;
+            total += rb.count;
+        }
+
+        if (total != static_cast<long>(num_particles_))
+        {
+            free(host_rb);
+            std::cerr << "Row buffer total count mismatch total=" << total << " num_particles=" << num_particles_ << std::endl;
+            throw std::runtime_error("Row buffer validation failed before update_particles (pre-kernel)");
+        }
+
+        free(host_rb);
+    }
+#endif
+
+#if !defined(GH) && defined(ENABLE_ROW_CHECKS)
+    // Validate row buffers before launching update_particles to catch bad pointers/counts early
+    cudaPointerAttributes attr{};
+    if (cudaPointerGetAttributes(&attr, row_buffers_) != cudaSuccess || attr.type != cudaMemoryTypeDevice)
+    {
+        throw std::runtime_error("row_buffers_ pointer is invalid or not on device");
+    }
+    if (cudaPointerGetAttributes(&attr, p) != cudaSuccess || attr.type != cudaMemoryTypeDevice)
+    {
+        throw std::runtime_error("p pointer is invalid or not on device");
+    }
+    if (cudaPointerGetAttributes(&attr, q) != cudaSuccess || attr.type != cudaMemoryTypeDevice)
+    {
+        throw std::runtime_error("q pointer is invalid or not on device");
+    }
+    if (cudaPointerGetAttributes(&attr, other) != cudaSuccess || attr.type != cudaMemoryTypeDevice)
+    {
+        throw std::runtime_error("other pointer is invalid or not on device");
+    }
+
+    // Host-side sanity check of row buffer starts/counts before launching device validator
+    row_buffer<Real, Real, long> * host_rb = (row_buffer<Real, Real, long> *) malloc(num_row_buffers_ * sizeof(row_buffer<Real, Real, long>));
+    if (host_rb == nullptr)
+    {
+        throw std::runtime_error("Failed to allocate host buffer for row validation");
+    }
+
+    auto rb_copy = cudaMemcpy(host_rb, row_buffers_, num_row_buffers_ * sizeof(row_buffer<Real, Real, long>), cudaMemcpyDeviceToHost);
+    if (rb_copy != cudaSuccess)
+    {
+        free(host_rb);
+        throw std::runtime_error("Failed to copy row_buffers_ to host for validation");
+    }
+
+    for (uint32_t r = 0; r < num_row_buffers_; ++r)
+    {
+        const auto & rb = host_rb[r];
+
+        if (rb.p == nullptr || rb.q == nullptr || rb.other == nullptr)
+        {
+            free(host_rb);
+            std::cerr << "Row buffer null pointer at row " << r << std::endl;
+            throw std::runtime_error("Row buffer validation failed before update_particles (host check)");
+        }
+
+        auto start = static_cast<long>((rb.p - p) / 3);
+        if (start < 0 || start > static_cast<long>(num_particles_))
+        {
+            free(host_rb);
+            std::cerr << "Row buffer start out of range at row " << r << " start=" << start << " count=" << rb.count << std::endl;
+            throw std::runtime_error("Row buffer validation failed before update_particles (host check)");
+        }
+
+        auto end = start + rb.count;
+        if (rb.count < 0 || end > static_cast<long>(num_particles_))
+        {
+            free(host_rb);
+            std::cerr << "Row buffer count out of range at row " << r << " start=" << start << " end=" << end << " num_particles=" << num_particles_ << std::endl;
+            throw std::runtime_error("Row buffer validation failed before update_particles (host check)");
+        }
+    }
+
+    free(host_rb);
+
+    // Device-side validation is optional; disable by default to avoid masking real work with a debug fault
+#ifdef ENABLE_ROW_CHECKS_DEVICE
+    RowCheckResult * chk = nullptr;
+    auto alloc_chk = cudaMalloc(&chk, sizeof(RowCheckResult));
+    if (alloc_chk == cudaSuccess)
+    {
+        cudaMemset(chk, 0, sizeof(RowCheckResult));
+        check_row_buffers<part, part_info><<<(num_row_buffers_ + 127) / 128, 128>>>(this, chk);
+        auto chk_sync = cudaDeviceSynchronize();
+        if (chk_sync == cudaSuccess)
+        {
+            RowCheckResult host_chk{};
+            cudaMemcpy(&host_chk, chk, sizeof(RowCheckResult), cudaMemcpyDeviceToHost);
+            if (host_chk.code != 0)
+            {
+                std::cerr << "Row buffer validation failed: row=" << host_chk.row
+                          << " code=" << host_chk.code << " start=" << host_chk.start
+                          << " count=" << host_chk.count << std::endl;
+                throw std::runtime_error("Row buffer validation failed before update_particles");
+            }
+        }
+        else
+        {
+            std::cerr << "check_row_buffers kernel failed: " << cudaGetErrorString(chk_sync) << std::endl;
+        }
+        cudaFree(chk);
+    }
+#endif
+#endif
+
+    update_particles<<<num_row_buffers_, 128>>>(this, update_funct, dtau, fields, nfields, params, output_dev, reduce_type_dev, noutput, &v2, copyout);
 
     if (async)
     {
@@ -1249,6 +1771,22 @@ void perfParticles<part, part_info>::updateParticles(UpdateFunct update_funct, d
     {
         std::cerr << "CUDA kernel failed: " << cudaGetErrorString(success) << std::endl;
         throw std::runtime_error("Error in CUDA kernel update_particles");
+    }
+
+    // copy staged outputs back to host if needed
+    if (output_dev_owned && output != nullptr)
+    {
+        auto copy_back = cudaMemcpy(output, output_dev, noutput * sizeof(double), cudaMemcpyDeviceToHost);
+        if (copy_back != cudaSuccess)
+        {
+            std::cerr << "cudaMemcpy failed copying output back: " << cudaGetErrorString(copy_back) << std::endl;
+            throw std::runtime_error("Failed to copy output back to host after update_particles");
+        }
+        cudaFree(output_dev);
+    }
+    if (reduce_type_dev_owned)
+    {
+        cudaFree(reduce_type_dev);
     }
 
     for (int i = 0; i < noutput; i++)
