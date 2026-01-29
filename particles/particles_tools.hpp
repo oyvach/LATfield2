@@ -12,6 +12,9 @@ LATfield2::Real get_lattice_resolution(int npts[3],LATfield2::Real boxSize[3])
   if(latRes[0]==latRes[1] && latRes[0]==latRes[2])return latRes[0];
   else{
     COUT<< "wrong physical box size and lattice size, relosution must be same in each dimensions"<<endl;
+    COUT << " latRes[0]="<<latRes[0]<<" latRes[1]="<<latRes[1]<<" latRes[2]="<<latRes[2]<<endl;
+    COUT << " boxSize[0]="<<boxSize[0]<<" boxSize[1]="<<boxSize[1]<<" boxSize[2]="<<boxSize[2]<<endl;
+    COUT << " npts[0]="<<npts[0]<<" npts[1]="<<npts[1]<<" npts[2]="<<npts[2]<<endl;
     COUT<< " Exiting... "<<endl;
     exit(222);
       return -1;
