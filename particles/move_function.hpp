@@ -22,7 +22,7 @@ void move_particles_simple(double dtau,
                                int nfield,
                                double * params,
                                double * outputs,
-                               int noutputs){
+                               int noutputs, void ** vparams = NULL){
 
 
     //double a;

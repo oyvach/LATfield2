@@ -55,6 +55,8 @@ Lattice::~Lattice()
 		delete[] jump_;
         delete[] sizeLocalAllProcDim0_;
         delete[] sizeLocalAllProcDim1_;
+		cudaFree(d_jump_);
+		cudaFree(d_sizeLocal_);
     }
 }
 //INITIALIZE=========================
@@ -77,6 +79,8 @@ void Lattice::initialize(int dim, const int* size, int halo)
 		delete[] jump_;
         delete[] sizeLocalAllProcDim0_;
         delete[] sizeLocalAllProcDim1_;
+		cudaFree(d_jump_);
+		cudaFree(d_sizeLocal_);
     }
 	//Store input lattice properties
 	dim_ =dim;
@@ -92,6 +96,9 @@ void Lattice::initialize(int dim, const int* size, int halo)
 	sizeLocal_[dim_-2]=int(ceil( (parallel.grid_size()[1]-parallel.grid_rank()[1])*size_[dim_-2]/float(parallel.grid_size()[1]) ));
 	sizeLocal_[dim_-2]-=int(ceil((parallel.grid_size()[1]-parallel.grid_rank()[1]-1)*size_[dim_-2]/float(parallel.grid_size()[1]) ));
 	for(i=0;i<dim_-2;i++) sizeLocal_[i]=size_[i];
+
+	cudaMalloc(&d_sizeLocal_, dim_ * sizeof(int));
+	cudaMemcpy(d_sizeLocal_, sizeLocal_, dim_ * sizeof(int), cudaMemcpyDefault);
     
     sizeLocalAllProcDim0_ = new int[parallel.grid_size()[0]];
 	sizeLocalAllProcDim1_ = new int[parallel.grid_size()[1]];
@@ -111,6 +118,9 @@ void Lattice::initialize(int dim, const int* size, int halo)
 	jump_=new long[dim_];
 	jump_[0]=1;
 	for(i=1;i<dim_;i++) jump_[i]=jump_[i-1]*(sizeLocal_[i-1]+2*halo_);
+
+	cudaMalloc(&d_jump_, dim_ * sizeof(long));
+	cudaMemcpy(d_jump_, jump_, dim_ * sizeof(long), cudaMemcpyDefault);
 	
 	//Calculate number of sites in lattice
 	sitesLocal_=1;
@@ -417,15 +427,29 @@ long  Lattice::sitesGross() { return sitesGross_; }
 int  Lattice::halo() { return halo_; }
 
 int* Lattice::sizeLocal() { return sizeLocal_; };
-int  Lattice::sizeLocal(int i) { return sizeLocal_[i]; }
+__host__ __device__ int  Lattice::sizeLocal(int i)
+{
+	#ifdef __CUDA_ARCH__
+	    return d_sizeLocal_[i];
+	#else
+		return sizeLocal_[i];
+	#endif
+}
 long  Lattice::sitesLocal() { return sitesLocal_; }
 long  Lattice::sitesLocalGross() { return sitesLocalGross_; }
 
-long  Lattice::jump(int i) { return jump_[i]; }
+__host__ __device__ long  Lattice::jump(int i)
+{
+	#ifdef __CUDA_ARCH__
+	    return d_jump_[i];
+	#else
+		return jump_[i];
+	#endif
+}
 long  Lattice::sitesSkip() { return sitesSkip_; }
 long  Lattice::sitesSkip2d() { return sitesSkip2d_; }
-long*  Lattice::coordSkip() { return coordSkip_; }
-long Lattice::siteFirst() { return siteFirst_; }
+__host__ __device__ long*  Lattice::coordSkip() { return coordSkip_; }
+__host__ __device__ long Lattice::siteFirst() { return siteFirst_; }
 long Lattice::siteLast() { return siteLast_; }
 
 int * Lattice::sizeLocalAllProcDim0(){ return sizeLocalAllProcDim0_; }

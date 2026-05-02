@@ -29,44 +29,31 @@ extern  const int FFT_OUT_OF_PLACE;
 
 #ifndef DOXYGEN_SHOULD_SKIP_THIS
 
-/*! \class temporaryMemFFT
- \brief A class wich handle the additional memory needed by the class PlanFFT_CPU; No documentation!
- */
- class temporaryMemFFT
- 	{
- 	public:
- 		temporaryMemFFT();
- 		~temporaryMemFFT();
- 		temporaryMemFFT(long size);
-
- 		int setTemp(long size);
-
- #ifdef SINGLE
- 		fftwf_complex* temp1(){return temp1_;}
- 		fftwf_complex* temp2(){return temp2_;}
- #endif
-
- #ifndef SINGLE
- 	        fftw_complex * temp1(){return temp1_;}
- 	        fftw_complex * temp2(){return temp2_;}
- #endif
-
- 	private:
- #ifdef SINGLE
- 		fftwf_complex * temp1_;
- 		fftwf_complex * temp2_;
- #endif
-
- #ifndef SINGLE
- 		fftw_complex * temp1_;
- 		fftw_complex * temp2_;
- #endif
- 		long allocated_; //number of variable stored (bit = allocated*sizeof(fftw(f)_complex))
- 	};
-
+const char* cufftGetErrorString(cufftResult status) {
+    switch (status) {
+        case CUFFT_SUCCESS:                return "CUFFT_SUCCESS";
+        case CUFFT_INVALID_PLAN:           return "CUFFT_INVALID_PLAN";
+        case CUFFT_ALLOC_FAILED:           return "CUFFT_ALLOC_FAILED";
+        case CUFFT_INVALID_TYPE:           return "CUFFT_INVALID_TYPE";
+        case CUFFT_INVALID_VALUE:          return "CUFFT_INVALID_VALUE";
+        case CUFFT_INTERNAL_ERROR:         return "CUFFT_INTERNAL_ERROR";
+        case CUFFT_EXEC_FAILED:            return "CUFFT_EXEC_FAILED";
+        case CUFFT_SETUP_FAILED:           return "CUFFT_SETUP_FAILED";
+        case CUFFT_INVALID_SIZE:           return "CUFFT_INVALID_SIZE";
+        case CUFFT_UNALIGNED_DATA:         return "CUFFT_UNALIGNED_DATA";
+#if (CUDART_VERSION >= 6050)
+        case CUFFT_INCOMPLETE_PARAMETER_LIST: return "CUFFT_INCOMPLETE_PARAMETER_LIST";
+        case CUFFT_INVALID_DEVICE:         return "CUFFT_INVALID_DEVICE";
+        case CUFFT_PARSE_ERROR:            return "CUFFT_PARSE_ERROR";
+        case CUFFT_NO_WORKSPACE:           return "CUFFT_NO_WORKSPACE";
+        case CUFFT_NOT_IMPLEMENTED:        return "CUFFT_NOT_IMPLEMENTED";
+        case CUFFT_LICENSE_ERROR:          return "CUFFT_LICENSE_ERROR";
+#endif
+        default:                           return "Unknown CUFFT error";
+    }
+}
 
 extern  temporaryMemFFT tempMemory;
-extern  temporaryMemFFT tempMemoryC;
 
 /*! \class PlanFFT
 
@@ -142,7 +129,7 @@ public:
 #endif
 
 
-
+  void preallocate();
   void execute(int fft_type);
 
 private:
@@ -174,11 +161,12 @@ private:
   bool status_;
   bool type_;
   int mem_type_;
+  bool alignment_even_;
 
   static bool R2C;
   static bool C2C;
 
-  static bool initialized;
+  //static bool initialized;
 
   //data description variable, fftw plan, and temp
 
@@ -195,13 +183,22 @@ private:
   int rHalo_;
   int kHalo_;
 
+  cufftHandle cufPlan_i_;
+  cufftHandle cufPlan_j_;
+  cufftHandle cufPlan_k_;
+  cufftHandle cufPlan_k_real_;
+
+  cufftHandle cubPlan_i_;
+  cufftHandle cubPlan_j_;
+  cufftHandle cubPlan_j_real_;
+  cufftHandle cubPlan_k_;
+
 #ifdef SINGLE
   float * rData_; //pointer to start of data (halo skip)
   fftwf_complex * cData_; //pointer to start of data (halo skip)
   fftwf_complex * kData_; //pointer to start of data (halo skip)
   fftwf_complex * temp_;
   fftwf_complex * temp1_;//needed if field got more than 1 component
-
 
   fftwf_plan fPlan_i_;
   fftwf_plan fPlan_j_;
@@ -218,18 +215,23 @@ private:
   /// forward real to complex
   // first transopsition
   void transpose_0_2( fftwf_complex * in, fftwf_complex * out,int dim_i,int dim_j ,int dim_k);
+  void transpose_0_2( cufftComplex * in, cufftComplex * out,int dim_i,int dim_j ,int dim_k, cudaStream_t &stream);
   void transpose_0_2_last_proc( fftwf_complex * in, fftwf_complex * out,int dim_i,int dim_j ,int dim_k);
+  void transpose_0_2_last_proc( cufftComplex * in, cufftComplex * out,int dim_i,int dim_j ,int dim_k, cudaStream_t &stream);
   void implement_local_0_last_proc( fftwf_complex * in, fftwf_complex * out,int proc_dim_i,int proc_dim_j,int proc_dim_k,int proc_size);
+  void implement_local_0_last_proc( cufftComplex * in, cufftComplex * out,int proc_dim_i,int proc_dim_j,int proc_dim_k,int proc_size, cudaStream_t &stream);
   // second transposition
   void transpose_1_2(fftwf_complex * in , fftwf_complex * out  ,int dim_i,int dim_j ,int dim_k);
+  void transpose_1_2(cufftComplex * in , cufftComplex * out  ,int dim_i,int dim_j ,int dim_k, cudaStream_t &stream);
   //third transposition
   void transpose_back_0_3(fftwf_complex * in, fftwf_complex * out,int r2c,int local_r2c,int local_size_j,int local_size_k,int proc_size,int halo,int components,int comp);
   void implement_0(fftwf_complex * in, fftwf_complex * out,int r2c_size,int local_size_j,int local_size_k,int halo,int components,int comp);
   ////backward real to complex
   void b_arrange_data_0(fftwf_complex *in, fftwf_complex * out,int dim_i,int dim_j ,int dim_k, int khalo, int components, int comp);
   void b_transpose_back_0_1(fftwf_complex * in, fftwf_complex * out,int r2c,int local_r2c,int local_size_j,int local_size_k,int proc_size);
+  void b_transpose_back_0_1(cufftComplex * in, cufftComplex * out,int r2c,int local_r2c,int local_size_j,int local_size_k,int proc_size, cudaStream_t &stream);
   void b_implement_0(fftwf_complex * in, fftwf_complex * out,int r2c_size,int local_size_j,int local_size_k);
-
+  void b_implement_0(cufftComplex * in, cufftComplex * out,int r2c_size,int local_size_j,int local_size_k, cudaStream_t &stream);
 
 #endif
 #ifndef SINGLE
@@ -257,17 +259,23 @@ private:
   /// forward real to complex
   // first transopsition
   void transpose_0_2( fftw_complex * in, fftw_complex * out,int dim_i,int dim_j ,int dim_k);
+  void transpose_0_2( cufftDoubleComplex * in, cufftDoubleComplex * out,int dim_i,int dim_j ,int dim_k, cudaStream_t &stream);
   void transpose_0_2_last_proc( fftw_complex * in, fftw_complex * out,int dim_i,int dim_j ,int dim_k);
+  void transpose_0_2_last_proc( cufftDoubleComplex * in, cufftDoubleComplex * out,int dim_i,int dim_j ,int dim_k, cudaStream_t &stream);
   void implement_local_0_last_proc( fftw_complex * in, fftw_complex * out,int proc_dim_i,int proc_dim_j,int proc_dim_k,int proc_size);
+  void implement_local_0_last_proc( cufftDoubleComplex * in, cufftDoubleComplex * out,int proc_dim_i,int proc_dim_j,int proc_dim_k,int proc_size, cudaStream_t &stream);
   // second transposition
   void transpose_1_2(fftw_complex * in , fftw_complex * out  ,int dim_i,int dim_j ,int dim_k);
+  void transpose_1_2(cufftDoubleComplex * in , cufftDoubleComplex * out  ,int dim_i,int dim_j ,int dim_k, cudaStream_t &stream);
   //third transposition
   void transpose_back_0_3(fftw_complex * in, fftw_complex * out,int r2c,int local_r2c,int local_size_j,int local_size_k,int proc_size,int halo,int components,int comp);
   void implement_0(fftw_complex * in, fftw_complex * out,int r2c_size,int local_size_j,int local_size_k,int halo,int components,int comp);
   ////backward real to complex
   void b_arrange_data_0(fftw_complex *in, fftw_complex * out,int dim_i,int dim_j ,int dim_k, int khalo, int components, int comp);
   void b_transpose_back_0_1(fftw_complex * in, fftw_complex * out,int r2c,int local_r2c,int local_size_j,int local_size_k,int proc_size);
+  void b_transpose_back_0_1(cufftDoubleComplex * in, cufftDoubleComplex * out,int r2c,int local_r2c,int local_size_j,int local_size_k,int proc_size, cudaStream_t &stream);
   void b_implement_0(fftw_complex * in, fftw_complex * out,int r2c_size,int local_size_j,int local_size_k);
+  void b_implement_0(cufftDoubleComplex * in, cufftDoubleComplex * out,int r2c_size,int local_size_j,int local_size_k, cudaStream_t &stream);
 
 
 
@@ -277,8 +285,8 @@ private:
 };
 
 //constants
-template<class compType>
-bool PlanFFT<compType>::initialized = true;
+//template<class compType>
+//bool PlanFFT<compType>::initialized = true;
 template<class compType>
 bool PlanFFT<compType>::R2C=false;
 template<class compType>
@@ -289,23 +297,23 @@ bool PlanFFT<compType>::C2C=true;
 template<class compType>
 PlanFFT<compType>::~PlanFFT() {
 #ifndef SINGLE
-  // if (fPlan_i_ != NULLFFTWPLAN) { fftw_destroy_plan(fPlan_i_); }
-  // if (fPlan_j_ != NULLFFTWPLAN) { fftw_destroy_plan(fPlan_j_); }
-  // if (fPlan_k_ != NULLFFTWPLAN) { fftw_destroy_plan(fPlan_k_); }
-  // if (fPlan_k_real_ != NULLFFTWPLAN) { fftw_destroy_plan(fPlan_k_real_); }
-  // if (bPlan_k_ != NULLFFTWPLAN) { fftw_destroy_plan(bPlan_k_); }
-  // if (bPlan_j_ != NULLFFTWPLAN) { fftw_destroy_plan(bPlan_j_); }
-  // if (bPlan_j_real_ != NULLFFTWPLAN) { fftw_destroy_plan(bPlan_j_real_); }
-  // if (bPlan_i_ != NULLFFTWPLAN) { fftw_destroy_plan(bPlan_i_); }
+  //if (fPlan_i_ != NULLFFTWPLAN) { fftw_destroy_plan(fPlan_i_); }
+  //if (fPlan_j_ != NULLFFTWPLAN) { fftw_destroy_plan(fPlan_j_); }
+  //if (fPlan_k_ != NULLFFTWPLAN) { fftw_destroy_plan(fPlan_k_); }
+  //if (fPlan_k_real_ != NULLFFTWPLAN) { fftw_destroy_plan(fPlan_k_real_); }
+  //if (bPlan_k_ != NULLFFTWPLAN) { fftw_destroy_plan(bPlan_k_); }
+  //if (bPlan_j_ != NULLFFTWPLAN) { fftw_destroy_plan(bPlan_j_); }
+  //if (bPlan_j_real_ != NULLFFTWPLAN) { fftw_destroy_plan(bPlan_j_real_); }
+  //if (bPlan_i_ != NULLFFTWPLAN) { fftw_destroy_plan(bPlan_i_); }
 #else
-  // if (fPlan_i_ != NULLFFTWPLAN) { fftwf_destroy_plan(fPlan_i_); }
-  // if (fPlan_j_ != NULLFFTWPLAN) { fftwf_destroy_plan(fPlan_j_); }
-  // if (fPlan_k_ != NULLFFTWPLAN) { fftwf_destroy_plan(fPlan_k_); }
-  // if (fPlan_k_real_ != NULLFFTWPLAN) { fftwf_destroy_plan(fPlan_k_real_); }
-  // if (bPlan_k_ != NULLFFTWPLAN) { fftwf_destroy_plan(bPlan_k_); }
-  // if (bPlan_j_ != NULLFFTWPLAN) { fftwf_destroy_plan(bPlan_j_); }
-  // if (bPlan_j_real_ != NULLFFTWPLAN) { fftwf_destroy_plan(bPlan_j_real_); }
-  // if (bPlan_i_ != NULLFFTWPLAN) { fftwf_destroy_plan(bPlan_i_); }
+  //if (fPlan_i_ != NULLFFTWPLAN) { fftwf_destroy_plan(fPlan_i_); }
+  //if (fPlan_j_ != NULLFFTWPLAN) { fftwf_destroy_plan(fPlan_j_); }
+  //if (fPlan_k_ != NULLFFTWPLAN) { fftwf_destroy_plan(fPlan_k_); }
+  //if (fPlan_k_real_ != NULLFFTWPLAN) { fftwf_destroy_plan(fPlan_k_real_); }
+  //if (bPlan_k_ != NULLFFTWPLAN) { fftwf_destroy_plan(bPlan_k_); }
+  //if (bPlan_j_ != NULLFFTWPLAN) { fftwf_destroy_plan(bPlan_j_); }
+  //if (bPlan_j_real_ != NULLFFTWPLAN) { fftwf_destroy_plan(bPlan_j_real_); }
+  //if (bPlan_i_ != NULLFFTWPLAN) { fftwf_destroy_plan(bPlan_i_); }
 #endif
 
 
@@ -325,6 +333,7 @@ bPlan_j_real_(NULLFFTWPLAN),
 bPlan_i_(NULLFFTWPLAN)
 {
   status_ = false;
+  alignment_even_ = true;
 }
 
 
@@ -347,7 +356,7 @@ void PlanFFT<compType>::initialize(Field<compType>*  rfield,Field<compType>*  kf
 
   //general variable
 
-  // COUT<<"INITIALIZING COMPLEX FFT"<<endl;
+  COUT<<"INITIALIZING COMPLEX FFT"<<endl;
 
   if(rfield->components() != kfield->components())
   {
@@ -374,14 +383,10 @@ void PlanFFT<compType>::initialize(Field<compType>*  rfield,Field<compType>*  kf
   kHalo_ = kfield->lattice().halo();
 
   /////from latfield2d_IO
-  // tempMemory.setTemp((long)(rSize_[0]+2)  * (long)(rSizeLocal_[1]+2) * (long)(rSizeLocal_[2]+2));
+  tempMemory.setTemp((long)(rSize_[0] + 2*rHalo_)  * (long)(rSizeLocal_[1] + 2*rHalo_) * (long)(rSizeLocal_[2] + 2*rHalo_));
 
-  // 	temp_  = tempMemory.temp1();
-  // 	temp1_ = tempMemory.temp2();
-  tempMemoryC.setTemp((long)(rSize_[0]*2+2)  * (long)(rSizeLocal_[1]+2) * (long)(rSizeLocal_[2]+2));
-  
-    temp_  = tempMemoryC.temp1();
-  	temp1_ = tempMemoryC.temp2();
+  	temp_  = tempMemory.temp1();
+  	temp1_ = tempMemory.temp2();
 
   	if(rfield->lattice().dim()!=3)
   	{
@@ -471,7 +476,7 @@ PlanFFT<compType>::PlanFFT(Field<float>* rfield, Field<compType>*  kfield,const 
 }
 
 template<class compType>
-void PlanFFT<compType>::initialize(Field<float>*  rfield,Field<compType>*   kfield,const int mem_type )
+void PlanFFT<compType>::initialize(Field<float>*  rfield,Field<compType>*   kfield, const int mem_type )
 {
   type_ = R2C;
   mem_type_=mem_type;
@@ -506,7 +511,7 @@ void PlanFFT<compType>::initialize(Field<float>*  rfield,Field<compType>*   kfie
 
 
 
-  tempMemory.setTemp((r2cSize_+2) * (rSizeLocal_[1]+2) * (rSizeLocal_[2]+2));
+  tempMemory.setTemp((r2cSize_ + 2*rHalo_) * (rSizeLocal_[1] + 2*rHalo_) * (rSizeLocal_[2] + 2*rHalo_));
 
 
 
@@ -544,14 +549,94 @@ void PlanFFT<compType>::initialize(Field<float>*  rfield,Field<compType>*   kfie
 
   //create the fftw_plan
 
-  fPlan_i_ = fftwf_plan_many_dft_r2c(1,&rSize_[0],rSizeLocal_[1] ,rData_,NULL,components_, rJump_[1]*components_,temp_,NULL,rSizeLocal_[1]*rSizeLocal_[2],1,FFTW_ESTIMATE | FFTW_PRESERVE_INPUT);
-  fPlan_j_ = fftwf_plan_many_dft(1,&rSize_[0],rSizeLocal_[2]*r2cSizeLocal_,temp_,NULL,rSizeLocal_[2]*r2cSizeLocal_,1,temp_,NULL,rSizeLocal_[2]*r2cSizeLocal_,1,FFTW_FORWARD,FFTW_ESTIMATE);
-  fPlan_k_ = fftwf_plan_many_dft(1,&rSize_[0],r2cSizeLocal_as_,temp_,NULL,rSizeLocal_[2]*r2cSizeLocal_,1,temp1_,NULL,rSizeLocal_[2]*r2cSizeLocal_as_,1,FFTW_FORWARD,FFTW_ESTIMATE);
-  fPlan_k_real_ =  fftwf_plan_many_dft(1,&rSize_[0],rSizeLocal_[2],&temp_[r2cSizeLocal_as_],NULL,rSizeLocal_[2]*r2cSizeLocal_,r2cSizeLocal_,&temp1_[r2cSizeLocal_as_*rSizeLocal_[2]*rSize_[0]],NULL,rSizeLocal_[2],1,FFTW_FORWARD,FFTW_ESTIMATE);
+  cufftResult cufft_status;
+  int inembed[1] = {rSizeLocal_[0]};
+  int onembed[1] = {(r2cSize_-1)*rSizeLocal_[1]*rSizeLocal_[2] + 1};
 
-  bPlan_k_ = fftwf_plan_many_dft(1,&rSize_[0],kSizeLocal_[2]*r2cSizeLocal_,temp_,NULL,kSizeLocal_[2]*r2cSizeLocal_,1,temp_,NULL,kSizeLocal_[2]*r2cSizeLocal_,1,FFTW_BACKWARD,FFTW_ESTIMATE);
-  bPlan_j_ = fftwf_plan_many_dft(1,&rSize_[0],r2cSizeLocal_as_,temp_,NULL,rSizeLocal_[2]*r2cSizeLocal_,1,temp1_,NULL,rSizeLocal_[2]*r2cSizeLocal_as_,1,FFTW_BACKWARD,FFTW_ESTIMATE);
-  bPlan_j_real_ =  fftwf_plan_many_dft(1,&rSize_[0],rSizeLocal_[2],&temp_[r2cSizeLocal_as_],NULL,rSizeLocal_[2]*r2cSizeLocal_,r2cSizeLocal_,&temp1_[r2cSizeLocal_as_*rSizeLocal_[2]*rSize_[0]],NULL,rSizeLocal_[2],1,FFTW_BACKWARD,FFTW_ESTIMATE);
+  cufft_status = cufftPlanMany(&cufPlan_i_, 1, &rSize_[0], inembed, components_, rJump_[1]*components_, onembed, rSizeLocal_[1]*rSizeLocal_[2], 1, CUFFT_R2C, rSizeLocal_[1]);
+
+  if(cufft_status != CUFFT_SUCCESS)
+  {
+    cerr << "Latfield2d::PlanFFT::initialize : cufftPlanMany failed for forward plan i" << endl;
+    parallel.abortForce();
+  }
+
+  inembed[0] = 1;
+  onembed[0] = 1;
+
+  cufft_status = cufftPlanMany(&cufPlan_j_, 1, &rSize_[0], inembed, rSizeLocal_[2]*r2cSizeLocal_, 1, onembed, rSizeLocal_[2]*r2cSizeLocal_, 1, CUFFT_C2C, rSizeLocal_[2]*r2cSizeLocal_);
+
+  if(cufft_status != CUFFT_SUCCESS)
+  {
+    cerr << "Latfield2d::PlanFFT::initialize : cufftPlanMany failed for forward plan j" << endl;
+    parallel.abortForce();
+  }
+
+  cufft_status = cufftPlanMany(&cufPlan_k_, 1, &rSize_[0], inembed, rSizeLocal_[2]*r2cSizeLocal_, 1, onembed, rSizeLocal_[2]*r2cSizeLocal_as_, 1, CUFFT_C2C, r2cSizeLocal_as_);
+
+  if(cufft_status != CUFFT_SUCCESS)
+  {
+    cerr << "Latfield2d::PlanFFT::initialize : cufftPlanMany failed for forward plan k" << endl;
+    parallel.abortForce();
+  }
+
+  inembed[0] = r2cSizeLocal_;
+
+  cufft_status = cufftPlanMany(&cufPlan_k_real_, 1, &rSize_[0], inembed, rSizeLocal_[2]*r2cSizeLocal_, r2cSizeLocal_, onembed, rSizeLocal_[2], 1, CUFFT_C2C, rSizeLocal_[2]);
+
+  if(cufft_status != CUFFT_SUCCESS)
+  {
+    cerr << "Latfield2d::PlanFFT::initialize : cufftPlanMany failed for forward plan k_real" << endl;
+    parallel.abortForce();
+  }
+
+  inembed[0] = 1;
+
+  cufft_status = cufftPlanMany(&cubPlan_k_, 1, &rSize_[0], inembed, kSizeLocal_[2]*r2cSizeLocal_, 1, onembed, kSizeLocal_[2]*r2cSizeLocal_, 1, CUFFT_C2C, kSizeLocal_[2]*r2cSizeLocal_);
+
+  if(cufft_status != CUFFT_SUCCESS)
+  {
+    cerr << "Latfield2d::PlanFFT::initialize : cufftPlanMany failed for backward plan k" << endl;
+    parallel.abortForce();
+  }
+
+  cufft_status = cufftPlanMany(&cubPlan_j_, 1, &rSize_[0], inembed, rSizeLocal_[2]*r2cSizeLocal_, 1, onembed, rSizeLocal_[2]*r2cSizeLocal_as_, 1, CUFFT_C2C, r2cSizeLocal_as_);
+
+  if(cufft_status != CUFFT_SUCCESS)
+  {
+    cerr << "Latfield2d::PlanFFT::initialize : cufftPlanMany failed for backward plan j" << endl;
+    parallel.abortForce();
+  }
+
+  inembed[0] = r2cSizeLocal_;
+
+  cufft_status = cufftPlanMany(&cubPlan_j_real_, 1, &rSize_[0], inembed, rSizeLocal_[2]*r2cSizeLocal_, r2cSizeLocal_, onembed, rSizeLocal_[2], 1, CUFFT_C2C, rSizeLocal_[2]);
+
+  if(cufft_status != CUFFT_SUCCESS)
+  {
+    cerr << "Latfield2d::PlanFFT::initialize : cufftPlanMany failed for backward plan j_real" << endl;
+    parallel.abortForce();
+  }
+
+  inembed[0] = r2cSize_;
+  onembed[0] = rJump_[1];
+
+  cufft_status = cufftPlanMany(&cubPlan_i_, 1, &rSize_[0], inembed, 1, r2cSize_, onembed, components_, rJump_[1]*components_, CUFFT_C2R, rSizeLocal_[1]);
+
+  if(cufft_status != CUFFT_SUCCESS)
+  {
+    cerr << "Latfield2d::PlanFFT::initialize : cufftPlanMany failed for backward plan i" << endl;
+    parallel.abortForce();
+  }
+
+  fPlan_i_ = fftwf_plan_many_dft_r2c(1,&rSize_[0],rSizeLocal_[1] ,rData_,NULL,components_, rJump_[1]*components_,temp_,NULL,rSizeLocal_[1]*rSizeLocal_[2],1,FFTW_ESTIMATE | FFTW_PRESERVE_INPUT);
+  //fPlan_j_ = fftwf_plan_many_dft(1,&rSize_[0],rSizeLocal_[2]*r2cSizeLocal_,temp_,NULL,rSizeLocal_[2]*r2cSizeLocal_,1,temp_,NULL,rSizeLocal_[2]*r2cSizeLocal_,1,FFTW_FORWARD,FFTW_ESTIMATE);
+  //fPlan_k_ = fftwf_plan_many_dft(1,&rSize_[0],r2cSizeLocal_as_,temp_,NULL,rSizeLocal_[2]*r2cSizeLocal_,1,temp1_,NULL,rSizeLocal_[2]*r2cSizeLocal_as_,1,FFTW_FORWARD,FFTW_ESTIMATE);
+  //fPlan_k_real_ =  fftwf_plan_many_dft(1,&rSize_[0],rSizeLocal_[2],&temp_[r2cSizeLocal_as_],NULL,rSizeLocal_[2]*r2cSizeLocal_,r2cSizeLocal_,&temp1_[r2cSizeLocal_as_*rSizeLocal_[2]*rSize_[0]],NULL,rSizeLocal_[2],1,FFTW_FORWARD,FFTW_ESTIMATE);
+
+  //bPlan_k_ = fftwf_plan_many_dft(1,&rSize_[0],kSizeLocal_[2]*r2cSizeLocal_,temp_,NULL,kSizeLocal_[2]*r2cSizeLocal_,1,temp_,NULL,kSizeLocal_[2]*r2cSizeLocal_,1,FFTW_BACKWARD,FFTW_ESTIMATE);
+  //bPlan_j_ = fftwf_plan_many_dft(1,&rSize_[0],r2cSizeLocal_as_,temp_,NULL,rSizeLocal_[2]*r2cSizeLocal_,1,temp1_,NULL,rSizeLocal_[2]*r2cSizeLocal_as_,1,FFTW_BACKWARD,FFTW_ESTIMATE);
+  //bPlan_j_real_ =  fftwf_plan_many_dft(1,&rSize_[0],rSizeLocal_[2],&temp_[r2cSizeLocal_as_],NULL,rSizeLocal_[2]*r2cSizeLocal_,r2cSizeLocal_,&temp1_[r2cSizeLocal_as_*rSizeLocal_[2]*rSize_[0]],NULL,rSizeLocal_[2],1,FFTW_BACKWARD,FFTW_ESTIMATE);
   bPlan_i_ = fftwf_plan_many_dft_c2r(1,&rSize_[0],rSizeLocal_[1] ,temp1_,NULL,1, r2cSize_,rData_,NULL,components_,rJump_[1]*components_,FFTW_ESTIMATE);
 
 //  PrintPlans();
@@ -559,11 +644,11 @@ void PlanFFT<compType>::initialize(Field<float>*  rfield,Field<compType>*   kfie
   //allocation of field
 
   long rfield_size = rfield->lattice().sitesLocalGross();
-  long kfield_size = kfield->lattice().sitesLocalGross()*2; //*2 for complex type
+  long kfield_size = (r2cSize_ + 2) * (rSizeLocal_[1] + 2) * (rSizeLocal_[2] + 2); // kfield->lattice().sitesLocalGross() * 2; //*2 for complex type (WHY?)
 
   if(mem_type_==FFT_IN_PLACE)
   {
-    if(rfield_size>kfield_size)
+    if(rfield_size>kfield_size*2)
     {
       rfield->alloc();
       kfield->data() = (Imag *)rfield->data();
@@ -576,8 +661,8 @@ void PlanFFT<compType>::initialize(Field<float>*  rfield,Field<compType>*   kfie
   }
   if(mem_type_ == FFT_OUT_OF_PLACE)
   {
-    rfield->alloc();
-    kfield->alloc();
+    rfield->alloc(rfield_size, Field<float>::managed);
+    kfield->alloc(kfield_size);
   }
 
 
@@ -588,6 +673,37 @@ void PlanFFT<compType>::initialize(Field<float>*  rfield,Field<compType>*   kfie
   cData_ = (fftwf_complex*)kfield->data(); //to be sure that cData is instantiate !
   kData_ = (fftwf_complex*)kfield->data();
   kData_ += kfield->lattice().siteFirst()*components_;
+
+  bool local_alignment_even = true;
+#ifdef SINGLE
+  if (get_pointer_alignment(rData_) < alignof(cufftComplex))
+  {
+    local_alignment_even = false;
+  }
+#else
+  if (get_pointer_alignment(rData_) < alignof(cufftDoubleComplex))
+  {
+    local_alignment_even = false;
+  }
+#endif
+
+  int local_alignment = local_alignment_even ? 1 : 0;
+  int min_alignment = 0;
+  int max_alignment = 0;
+  MPI_Allreduce(&local_alignment, &min_alignment, 1, MPI_INT, MPI_MIN, parallel.lat_world_comm());
+  MPI_Allreduce(&local_alignment, &max_alignment, 1, MPI_INT, MPI_MAX, parallel.lat_world_comm());
+
+  if (min_alignment != max_alignment)
+  {
+    if(parallel.isRoot())
+    {
+      cerr<<"Latfield2d::PlanFFT::initialize : inconsistent data alignment across MPI processes for CUDA FFT"<<endl;
+      cerr<<"Latfield2d : Abort Process Requested"<<endl;
+    }
+    parallel.abortForce();
+  }
+
+  alignment_even_ = (max_alignment == 1);
 
 
 
@@ -637,14 +753,10 @@ void PlanFFT<compType>::initialize(Field<compType>*  rfield,Field<compType>*  kf
   kHalo_ = kfield->lattice().halo();
 
   /////from latfield2d_IO
-  tempMemoryC.setTemp((long)(rSize_[0]*2+10)  * (long)(rSizeLocal_[1]+10) * (long)(rSizeLocal_[2]+10));
+  tempMemory.setTemp((long)(rSize_[0] + 2*rHalo_)  * (long)(rSizeLocal_[1] + 2*rHalo_) * (long)(rSizeLocal_[2] + 2*rHalo_));
 
-  	temp_  = tempMemoryC.temp1();
-  	temp1_ = tempMemoryC.temp2();
-  // tempMemory.setTemp((long)(rSize_[0]+10)  * (long)(rSizeLocal_[1]+10) * (long)(rSizeLocal_[2]+10));
-
-  // 	temp_  = tempMemory.temp1();
-  // 	temp1_ = tempMemory.temp2();
+  	temp_  = tempMemory.temp1();
+  	temp1_ = tempMemory.temp2();
 
   	if(rfield->lattice().dim()!=3)
   	{
@@ -759,19 +871,10 @@ void PlanFFT<compType>::initialize(Field<double>*  rfield,Field<compType>*   kfi
   rHalo_ = rfield->lattice().halo();
   kHalo_ = kfield->lattice().halo();
 
-
-
-
-
-  tempMemory.setTemp((r2cSize_+2) * (rSizeLocal_[1]+2) * (rSizeLocal_[2]+2));
-
-
+  tempMemory.setTemp((r2cSize_ + 2*rHalo_) * (rSizeLocal_[1] + 2*rHalo_) * (rSizeLocal_[2] + 2*rHalo_));
 
   temp_  = tempMemory.temp1();
   temp1_ = tempMemory.temp2();
-
-
-
 
   if(rfield->lattice().dim()!=3)
   {
@@ -802,11 +905,11 @@ void PlanFFT<compType>::initialize(Field<double>*  rfield,Field<compType>*   kfi
   //create the fftw_plan
 
   long rfield_size = rfield->lattice().sitesLocalGross();
-  long kfield_size = kfield->lattice().sitesLocalGross()*2; //*2 for complex type
+  long kfield_size = (r2cSize_ + 2) * (rSizeLocal_[1] + 2) * (rSizeLocal_[2] + 2); //kfield->lattice().sitesLocalGross(); //*2 for complex type
 
   if(mem_type_==FFT_IN_PLACE)
   {
-    if(rfield_size>kfield_size)
+    if(rfield_size>kfield_size*2)
     {
       rfield->alloc();
       kfield->data() = (Imag *)rfield->data();
@@ -819,8 +922,8 @@ void PlanFFT<compType>::initialize(Field<double>*  rfield,Field<compType>*   kfi
   }
   if(mem_type_ == FFT_OUT_OF_PLACE)
   {
-    rfield->alloc();
-    kfield->alloc();
+    rfield->alloc(rfield_size, Field<double>::managed);
+    kfield->alloc(kfield_size);
   }
 
 
@@ -832,14 +935,125 @@ void PlanFFT<compType>::initialize(Field<double>*  rfield,Field<compType>*   kfi
   kData_ = (fftw_complex*)kfield->data();
   kData_ += kfield->lattice().siteFirst()*components_;
 
-  fPlan_i_ = fftw_plan_many_dft_r2c(1,&rSize_[0],rSizeLocal_[1] ,rData_,NULL,components_, rJump_[1]*components_,temp_,NULL,rSizeLocal_[1]*rSizeLocal_[2],1,FFTW_ESTIMATE | FFTW_PRESERVE_INPUT);
-  fPlan_j_ = fftw_plan_many_dft(1,&rSize_[0],rSizeLocal_[2]*r2cSizeLocal_,temp_,NULL,rSizeLocal_[2]*r2cSizeLocal_,1,temp_,NULL,rSizeLocal_[2]*r2cSizeLocal_,1,FFTW_FORWARD,FFTW_ESTIMATE);
-  fPlan_k_ = fftw_plan_many_dft(1,&rSize_[0],r2cSizeLocal_as_,temp_,NULL,rSizeLocal_[2]*r2cSizeLocal_,1,temp1_,NULL,rSizeLocal_[2]*r2cSizeLocal_as_,1,FFTW_FORWARD,FFTW_ESTIMATE);
-  fPlan_k_real_ =  fftw_plan_many_dft(1,&rSize_[0],rSizeLocal_[2],&temp_[r2cSizeLocal_as_],NULL,rSizeLocal_[2]*r2cSizeLocal_,r2cSizeLocal_,&temp1_[r2cSizeLocal_as_*rSizeLocal_[2]*rSize_[0]],NULL,rSizeLocal_[2],1,FFTW_FORWARD,FFTW_ESTIMATE);
+  bool local_alignment_even = true;
+#ifdef SINGLE
+  if (get_pointer_alignment(rData_) < alignof(cufftComplex))
+  {
+    local_alignment_even = false;
+  }
+#else
+  if (get_pointer_alignment(rData_) < alignof(cufftDoubleComplex))
+  {
+    local_alignment_even = false;
+  }
+#endif
 
-  bPlan_k_ = fftw_plan_many_dft(1,&rSize_[0],kSizeLocal_[2]*r2cSizeLocal_,temp_,NULL,kSizeLocal_[2]*r2cSizeLocal_,1,temp_,NULL,kSizeLocal_[2]*r2cSizeLocal_,1,FFTW_BACKWARD,FFTW_ESTIMATE);
-  bPlan_j_ = fftw_plan_many_dft(1,&rSize_[0],r2cSizeLocal_as_,temp_,NULL,rSizeLocal_[2]*r2cSizeLocal_,1,temp1_,NULL,rSizeLocal_[2]*r2cSizeLocal_as_,1,FFTW_BACKWARD,FFTW_ESTIMATE);
-  bPlan_j_real_ =  fftw_plan_many_dft(1,&rSize_[0],rSizeLocal_[2],&temp_[r2cSizeLocal_as_],NULL,rSizeLocal_[2]*r2cSizeLocal_,r2cSizeLocal_,&temp1_[r2cSizeLocal_as_*rSizeLocal_[2]*rSize_[0]],NULL,rSizeLocal_[2],1,FFTW_BACKWARD,FFTW_ESTIMATE);
+  int local_alignment = local_alignment_even ? 1 : 0;
+  int min_alignment = 0;
+  int max_alignment = 0;
+  MPI_Allreduce(&local_alignment, &min_alignment, 1, MPI_INT, MPI_MIN, parallel.lat_world_comm());
+  MPI_Allreduce(&local_alignment, &max_alignment, 1, MPI_INT, MPI_MAX, parallel.lat_world_comm());
+
+  if (min_alignment != max_alignment)
+  {
+    if(parallel.isRoot())
+    {
+      cerr<<"Latfield2d::PlanFFT::initialize : inconsistent data alignment across MPI processes for CUDA FFT"<<endl;
+      cerr<<"Latfield2d : Abort Process Requested"<<endl;
+    }
+    parallel.abortForce();
+  }
+
+  alignment_even_ = (max_alignment == 1);
+
+  cufftResult cufft_status;
+  int inembed[1] = {rSizeLocal_[0]};
+  int onembed[1] = {(r2cSize_-1)*rSizeLocal_[1]*rSizeLocal_[2] + 1};
+
+  cufft_status = cufftPlanMany(&cufPlan_i_, 1, &rSize_[0], inembed, components_, rJump_[1]*components_, onembed, rSizeLocal_[1]*rSizeLocal_[2], 1, CUFFT_D2Z, rSizeLocal_[1]);
+
+  if(cufft_status != CUFFT_SUCCESS)
+  {
+    cerr << "Latfield2d::PlanFFT::initialize : cufftPlanMany failed for forward plan i" << endl;
+    parallel.abortForce();
+  }
+
+  inembed[0] = 1;
+  onembed[0] = 1;
+
+  cufft_status = cufftPlanMany(&cufPlan_j_, 1, &rSize_[0], inembed, rSizeLocal_[2]*r2cSizeLocal_, 1, onembed, rSizeLocal_[2]*r2cSizeLocal_, 1, CUFFT_Z2Z, rSizeLocal_[2]*r2cSizeLocal_);
+
+  if(cufft_status != CUFFT_SUCCESS)
+  {
+    cerr << "Latfield2d::PlanFFT::initialize : cufftPlanMany failed for forward plan j" << endl;
+    parallel.abortForce();
+  }
+
+  cufft_status = cufftPlanMany(&cufPlan_k_, 1, &rSize_[0], inembed, rSizeLocal_[2]*r2cSizeLocal_, 1, onembed, rSizeLocal_[2]*r2cSizeLocal_as_, 1, CUFFT_Z2Z, r2cSizeLocal_as_);
+
+  if(cufft_status != CUFFT_SUCCESS)
+  {
+    cerr << "Latfield2d::PlanFFT::initialize : cufftPlanMany failed for forward plan k" << endl;
+    parallel.abortForce();
+  }
+
+  inembed[0] = r2cSizeLocal_;
+
+  cufft_status = cufftPlanMany(&cufPlan_k_real_, 1, &rSize_[0], inembed, rSizeLocal_[2]*r2cSizeLocal_, r2cSizeLocal_, onembed, rSizeLocal_[2], 1, CUFFT_Z2Z, rSizeLocal_[2]);
+
+  if(cufft_status != CUFFT_SUCCESS)
+  {
+    cerr << "Latfield2d::PlanFFT::initialize : cufftPlanMany failed for forward plan k_real" << endl;
+    parallel.abortForce();
+  }
+
+  inembed[0] = 1;
+
+  cufft_status = cufftPlanMany(&cubPlan_k_, 1, &rSize_[0], inembed, kSizeLocal_[2]*r2cSizeLocal_, 1, onembed, kSizeLocal_[2]*r2cSizeLocal_, 1, CUFFT_Z2Z, kSizeLocal_[2]*r2cSizeLocal_);
+
+  if(cufft_status != CUFFT_SUCCESS)
+  {
+    cerr << "Latfield2d::PlanFFT::initialize : cufftPlanMany failed for backward plan k" << endl;
+    parallel.abortForce();
+  }
+
+  cufft_status = cufftPlanMany(&cubPlan_j_, 1, &rSize_[0], inembed, rSizeLocal_[2]*r2cSizeLocal_, 1, onembed, rSizeLocal_[2]*r2cSizeLocal_as_, 1, CUFFT_Z2Z, r2cSizeLocal_as_);
+
+  if(cufft_status != CUFFT_SUCCESS)
+  {
+    cerr << "Latfield2d::PlanFFT::initialize : cufftPlanMany failed for backward plan j" << endl;
+    parallel.abortForce();
+  }
+
+  inembed[0] = r2cSizeLocal_;
+
+  cufft_status = cufftPlanMany(&cubPlan_j_real_, 1, &rSize_[0], inembed, rSizeLocal_[2]*r2cSizeLocal_, r2cSizeLocal_, onembed, rSizeLocal_[2], 1, CUFFT_Z2Z, rSizeLocal_[2]);
+
+  if(cufft_status != CUFFT_SUCCESS)
+  {
+    cerr << "Latfield2d::PlanFFT::initialize : cufftPlanMany failed for backward plan j_real" << endl;
+    parallel.abortForce();
+  }
+
+  inembed[0] = r2cSize_;
+  onembed[0] = rJump_[1];
+
+  cufft_status = cufftPlanMany(&cubPlan_i_, 1, &rSize_[0], inembed, 1, r2cSize_, onembed, components_, rJump_[1]*components_, CUFFT_Z2D, rSizeLocal_[1]);
+
+  if(cufft_status != CUFFT_SUCCESS)
+  {
+    cerr << "Latfield2d::PlanFFT::initialize : cufftPlanMany failed for backward plan i" << endl;
+    parallel.abortForce();
+  }
+
+  fPlan_i_ = fftw_plan_many_dft_r2c(1,&rSize_[0],rSizeLocal_[1] ,rData_,NULL,components_, rJump_[1]*components_,temp_,NULL,rSizeLocal_[1]*rSizeLocal_[2],1,FFTW_ESTIMATE | FFTW_PRESERVE_INPUT);
+  //fPlan_j_ = fftw_plan_many_dft(1,&rSize_[0],rSizeLocal_[2]*r2cSizeLocal_,temp_,NULL,rSizeLocal_[2]*r2cSizeLocal_,1,temp_,NULL,rSizeLocal_[2]*r2cSizeLocal_,1,FFTW_FORWARD,FFTW_ESTIMATE);
+  //fPlan_k_ = fftw_plan_many_dft(1,&rSize_[0],r2cSizeLocal_as_,temp_,NULL,rSizeLocal_[2]*r2cSizeLocal_,1,temp1_,NULL,rSizeLocal_[2]*r2cSizeLocal_as_,1,FFTW_FORWARD,FFTW_ESTIMATE);
+  //fPlan_k_real_ =  fftw_plan_many_dft(1,&rSize_[0],rSizeLocal_[2],&temp_[r2cSizeLocal_as_],NULL,rSizeLocal_[2]*r2cSizeLocal_,r2cSizeLocal_,&temp1_[r2cSizeLocal_as_*rSizeLocal_[2]*rSize_[0]],NULL,rSizeLocal_[2],1,FFTW_FORWARD,FFTW_ESTIMATE);
+
+  //bPlan_k_ = fftw_plan_many_dft(1,&rSize_[0],kSizeLocal_[2]*r2cSizeLocal_,temp_,NULL,kSizeLocal_[2]*r2cSizeLocal_,1,temp_,NULL,kSizeLocal_[2]*r2cSizeLocal_,1,FFTW_BACKWARD,FFTW_ESTIMATE);
+  //bPlan_j_ = fftw_plan_many_dft(1,&rSize_[0],r2cSizeLocal_as_,temp_,NULL,rSizeLocal_[2]*r2cSizeLocal_,1,temp1_,NULL,rSizeLocal_[2]*r2cSizeLocal_as_,1,FFTW_BACKWARD,FFTW_ESTIMATE);
+  //bPlan_j_real_ =  fftw_plan_many_dft(1,&rSize_[0],rSizeLocal_[2],&temp_[r2cSizeLocal_as_],NULL,rSizeLocal_[2]*r2cSizeLocal_,r2cSizeLocal_,&temp1_[r2cSizeLocal_as_*rSizeLocal_[2]*rSize_[0]],NULL,rSizeLocal_[2],1,FFTW_BACKWARD,FFTW_ESTIMATE);
   bPlan_i_ = fftw_plan_many_dft_c2r(1,&rSize_[0],rSizeLocal_[1] ,temp1_,NULL,1, r2cSize_,rData_,NULL,components_,rJump_[1]*components_,FFTW_ESTIMATE);
 
 //  PrintPlans();
@@ -848,8 +1062,55 @@ void PlanFFT<compType>::initialize(Field<double>*  rfield,Field<compType>*   kfi
 #endif
 
 template<class compType>
+void PlanFFT<compType>::preallocate()
+{
+  long halo_pad = 2 * ((rHalo_ > kHalo_) ? rHalo_ : kHalo_);
+  long required_real = (long)(rSize_[0] + halo_pad) * (long)(rSizeLocal_[1] + halo_pad) * (long)(rSizeLocal_[2] + halo_pad);
+  long required_fourier = (long)(((r2cSize_ > 0) ? r2cSize_ : rSize_[0]) + halo_pad) * (long)(rSizeLocal_[1] + halo_pad) * (long)(rSizeLocal_[2] + halo_pad);
+  long required_capacity = required_real;
+  if (required_fourier > required_capacity) required_capacity = required_fourier;
+  tempMemory.setTemp(required_capacity);
+}
+
+template<class compType>
 void PlanFFT<compType>::execute(int fft_type)
 {
+  bool alignment_even = true;
+  cudaStream_t fft_stream;
+
+  long halo_pad = 2 * ((rHalo_ > kHalo_) ? rHalo_ : kHalo_);
+  long required_real = (long)(rSize_[0] + halo_pad) * (long)(rSizeLocal_[1] + halo_pad) * (long)(rSizeLocal_[2] + halo_pad);
+  long required_fourier = (long)(((r2cSize_ > 0) ? r2cSize_ : rSize_[0]) + halo_pad) * (long)(rSizeLocal_[1] + halo_pad) * (long)(rSizeLocal_[2] + halo_pad);
+  long required_capacity = required_real;
+  if (required_fourier > required_capacity) required_capacity = required_fourier;
+
+  if (tempMemory.allocated() < required_capacity)
+  {
+    // tempMemory.setTemp(required_capacity);
+    COUT << "NB: required reallocation of memory! Should only be allocated once. Check initial allocation\n";
+
+    if (tempMemory.allocated() < required_capacity)
+    {
+      cerr << "Latfield2d::PlanFFT::execute : insufficient temporary FFT buffer on proc "
+           << parallel.rank() << " (required=" << required_capacity
+           << ", allocated=" << tempMemory.allocated()
+           << ", halo_real=" << rHalo_ << ", halo_fourier=" << kHalo_
+           << ", local_size=(" << rSizeLocal_[0] << "," << rSizeLocal_[1] << "," << rSizeLocal_[2] << ")"
+           << ", grid=" << parallel.grid_size()[0] << "x" << parallel.grid_size()[1] << ")"
+           << endl;
+      parallel.abortForce();
+    }
+  }
+
+  temp_  = tempMemory.temp1();
+  temp1_ = tempMemory.temp2();
+
+  auto success = cudaStreamCreateWithFlags(&fft_stream, cudaStreamNonBlocking);
+  if (success != cudaSuccess)
+  {
+    cerr << "Latfield2d::PlanFFT::execute : cudaStreamCreateWithFlags failed" << endl;
+    parallel.abortForce();
+  }
 
   //#ifdef SINGLE
   if(type_ == R2C)
@@ -857,201 +1118,974 @@ void PlanFFT<compType>::execute(int fft_type)
 
     if(fft_type == FFT_FORWARD)
     {
-      int i,j,k;
-      int comp;
-      int comm_rank;
+      //int i,j,k;
+      //int comp;
+      //int comm_rank;
 
 #ifdef SINGLE
       float *p_in;
       fftwf_complex *p_out;
+      cufftComplex *cutemp_ = tempMemory.temp3();
+      cufftComplex *cutemp1_ = tempMemory.temp4();
+      cufftComplex *p_cufft;
+      long memsize = tempMemory.allocated()*sizeof(cufftComplex);
 #else
       double *p_in;
       fftw_complex *p_out;
+      cufftDoubleComplex *cutemp_ = tempMemory.temp3();
+      cufftDoubleComplex *cutemp1_ = tempMemory.temp4();
+      cufftDoubleComplex *p_cufft;
+      long memsize = tempMemory.allocated()*sizeof(cufftDoubleComplex);
 #endif
+      alignment_even = alignment_even_;
 
-      for(comp=0;comp<components_;comp++)
+      auto cufft_status = cufftSetStream(cufPlan_i_, fft_stream);
+      if (cufft_status != CUFFT_SUCCESS)
       {
-
-
-        //execute first dimension fft, prepar rData in temp_ to be send via AlltoAll + gather
-
-#ifdef SINGLE
-        for(int l = 0;l< rSizeLocal_[2] ;l++)
-        {
-          p_in = &rData_[rJump_[2]*l*components_ + comp];
-          p_out = &temp_[l*rSizeLocal_[1]];
-          fftwf_execute_dft_r2c(fPlan_i_,p_in,p_out);
-        }
-
-#else
-        for(int l = 0;l< rSizeLocal_[2] ;l++)
-        {
-          p_in = &rData_[rJump_[2]*l*components_ + comp];
-          p_out = &temp_[l*rSizeLocal_[1]];
-          fftw_execute_dft_r2c(fPlan_i_,p_in,p_out);
-        }
-#endif
-
-        MPI_Alltoall(temp_, 2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, temp1_, 2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, parallel.dim1_comm()[parallel.grid_rank()[0]]);
-        MPI_Gather(&temp_[(r2cSize_-1)*rSizeLocal_[1]*rSizeLocal_[2]][0], 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC, &temp1_[rSize_[0]/2*rSizeLocal_[1]*rSizeLocal_[2]][0] , 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC ,parallel.grid_size()[1]-1, parallel.dim1_comm()[parallel.grid_rank()[0]]);
-        MPI_Barrier(parallel.dim1_comm()[parallel.grid_rank()[0]]);
-
-        if(parallel.last_proc()[1])
-        {
-          for(i=0;i<parallel.grid_size()[1];i++)transpose_0_2_last_proc(&temp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],&temp_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_],rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_);
-          implement_local_0_last_proc(&temp1_[rSize_[0]/2*rSizeLocal_[1]*rSizeLocal_[2]],temp_,rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_,parallel.grid_size()[1]);
-        }
-        else for(i=0;i<parallel.grid_size()[1];i++)transpose_0_2(&temp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],&temp_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_);
-
-#ifdef SINGLE
-        fftwf_execute(fPlan_j_);
-#else
-        fftw_execute(fPlan_j_);
-#endif
-
-        MPI_Barrier(parallel.lat_world_comm());
-        MPI_Alltoall(temp_, (2*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_), MPI_DATA_PREC, temp1_, (2*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_), MPI_DATA_PREC, parallel.dim0_comm()[parallel.grid_rank()[1]]);
-        MPI_Barrier(parallel.dim0_comm()[parallel.grid_rank()[1]]);
-
-
-        for(i=0;i<parallel.grid_size()[0];i++)transpose_1_2(&temp1_[i*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_],&temp_[i*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_], r2cSizeLocal_,rSizeLocal_[2],rSizeLocal_[2]);
-
-#ifdef SINGLE
-        for(int l=0;l<rSizeLocal_[2];l++)
-        {
-          fftwf_execute_dft(fPlan_k_,&temp_[l*r2cSizeLocal_],&temp1_[l*r2cSizeLocal_as_]);
-        }
-
-        if(parallel.last_proc()[1])fftwf_execute(fPlan_k_real_);
-#else
-        for(int l=0;l<rSizeLocal_[2];l++)
-        {
-          fftw_execute_dft(fPlan_k_,&temp_[l*r2cSizeLocal_],&temp1_[l*r2cSizeLocal_as_]);
-        }
-
-        if(parallel.last_proc()[1])fftw_execute(fPlan_k_real_);
-
-#endif
-
-
-
-        MPI_Alltoall(temp1_, 2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, temp_, 2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, parallel.dim1_comm()[parallel.grid_rank()[0]]);
-        MPI_Scatter(&temp1_[r2cSizeLocal_as_*rSizeLocal_[2]*rSize_[0]][0], 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC, &temp_[(r2cSize_-1)*rSizeLocal_[1]*rSizeLocal_[2]][0] , 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC ,parallel.grid_size()[1]-1, parallel.dim1_comm()[parallel.grid_rank()[0]]);
-        MPI_Barrier(parallel.dim1_comm()[parallel.grid_rank()[0]]);
-
-
-        transpose_back_0_3(temp_, kData_,r2cSize_,r2cSizeLocal_as_,rSizeLocal_[2],rSizeLocal_[1],parallel.grid_size()[1],kHalo_,components_,comp);
-        implement_0(&temp_[(r2cSize_-1)*rSizeLocal_[1]*rSizeLocal_[2]], kData_,r2cSize_,rSizeLocal_[2],rSizeLocal_[1],kHalo_,components_,comp);
-
-
+        cerr << "Latfield2d::PlanFFT::execute : cufftSetStream failed for plan i" << endl;
+        parallel.abortForce();
       }
 
+      cufft_status = cufftSetStream(cufPlan_j_, fft_stream);
+      if (cufft_status != CUFFT_SUCCESS)
+      {
+        cerr << "Latfield2d::PlanFFT::execute : cufftSetStream failed for plan j" << endl;
+        parallel.abortForce();
+      }
 
+      cufft_status = cufftSetStream(cufPlan_k_, fft_stream);
+      if (cufft_status != CUFFT_SUCCESS)
+      {
+        cerr << "Latfield2d::PlanFFT::execute : cufftSetStream failed for plan k" << endl;
+        parallel.abortForce();
+      }
+
+      cufft_status = cufftSetStream(cufPlan_k_real_, fft_stream);
+      if (cufft_status != CUFFT_SUCCESS)
+      {
+        cerr << "Latfield2d::PlanFFT::execute : cufftSetStream failed for plan k_real" << endl;
+        parallel.abortForce();
+      }
+
+      if (alignment_even || components_ > 1)
+      {
+        for(int l = 0; l < rSizeLocal_[2]; l++)
+        {
+          p_in = &rData_[rJump_[2]*l*components_ + (alignment_even ? 0 : 1)];
+          p_cufft = &cutemp_[l*rSizeLocal_[1]];
+
+  #ifdef SINGLE
+          cufft_status = cufftExecR2C(cufPlan_i_, (cufftReal*)p_in, p_cufft);
+  #else
+          cufft_status = cufftExecD2Z(cufPlan_i_, (cufftDoubleReal*)p_in, p_cufft);
+  #endif
+          if (cufft_status != CUFFT_SUCCESS)
+          {
+  #ifdef SINGLE
+            cerr << "Latfield2d::PlanFFT::execute : cufftExecR2C failed on component " << (alignment_even ? 1 : 2) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #else
+            cerr << "Latfield2d::PlanFFT::execute : cufftExecD2Z failed on component " << (alignment_even ? 1 : 2) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #endif
+            parallel.abortForce();
+          }
+        }
+      }
+
+      for(int comp=0; comp<components_; comp += 2)
+      {
+        //execute first dimension fft, prepar rData in temp_ to be send via AlltoAll + gather
+
+        nvtxRangePushA("PlanFFT::execute : R2C transforms");
+
+        if (comp + 1 < components_ || !alignment_even)
+        {
+          nvtxRangePushA("PlanFFT::execute : interleaved R2C transform");
+#pragma omp parallel for private(p_in, p_out)
+          for(int l = 0; l < rSizeLocal_[2]; l++)
+          {
+            p_in = &rData_[rJump_[2]*l*components_ + comp + (alignment_even ? 1 : 0)];
+            p_out = &temp_[l*rSizeLocal_[1]];
+#ifdef SINGLE
+            fftwf_execute_dft_r2c(fPlan_i_,p_in,p_out);
+#else
+            fftw_execute_dft_r2c(fPlan_i_,p_in,p_out);
+#endif
+          }
+          nvtxRangePop();
+
+          nvtxRangePushA("PlanFFT::execute : interleaved MPI AlltoAll and Gather");
+          MPI_Alltoall(temp_, 2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, temp1_, 2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          MPI_Gather(&temp_[(r2cSize_-1)*rSizeLocal_[1]*rSizeLocal_[2]][0], 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC, &temp1_[rSize_[0]/2*rSizeLocal_[1]*rSizeLocal_[2]][0] , 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC ,parallel.grid_size()[1]-1, parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          MPI_Barrier(parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          nvtxRangePop();
+
+          success = cudaMemcpyAsync(cutemp1_, temp1_, memsize, cudaMemcpyDefault, fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaMemcpyAsync failed with error code " << success << " (" << cudaGetErrorString((cudaError_t)success) << ")" << endl;
+            parallel.abortForce();
+          }
+        }
+
+        if (comp + 1 < components_ || alignment_even)
+        {
+          success = cudaMemcpyAsync(temp_, cutemp_, memsize, cudaMemcpyDefault, fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaMemcpyAsync failed with error code " << success << " (" << cudaGetErrorString((cudaError_t)success) << ")" << endl;
+            parallel.abortForce();
+          }
+        }
+
+        success = cudaStreamSynchronize(fft_stream);
+        if (success != cudaSuccess)
+        {
+          cerr << "Latfield2d::PlanFFT::execute : cudaStreamSynchronize failed" << endl;
+          parallel.abortForce();
+        }        
+        nvtxRangePop();
+
+        if (comp + 1 < components_ || !alignment_even)
+        {
+          nvtxRangePushA("PlanFFT::execute : interleaved transpose");
+          if(parallel.last_proc()[1])
+          {
+            for(int i=0;i<parallel.grid_size()[1];i++)
+            {
+              //transpose_0_2_last_proc(&temp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],&temp_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_],rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_);
+              transpose_0_2_last_proc(&cutemp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],&cutemp_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_],rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_, fft_stream);
+            }
+            //implement_local_0_last_proc(&temp1_[rSize_[0]/2*rSizeLocal_[1]*rSizeLocal_[2]],temp_,rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_,parallel.grid_size()[1]);
+            implement_local_0_last_proc(&cutemp1_[rSize_[0]/2*rSizeLocal_[1]*rSizeLocal_[2]],cutemp_,rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_,parallel.grid_size()[1], fft_stream);
+          }
+          else
+          {
+            for(int i=0;i<parallel.grid_size()[1];i++)
+            {
+              //transpose_0_2(&temp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],&temp_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_);
+              transpose_0_2(&cutemp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],&cutemp_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_, fft_stream);
+            }
+          }
+          nvtxRangePop();
+
+          nvtxRangePushA("PlanFFT::execute : interleaved C2C transform");
+  #ifdef SINGLE
+          cufft_status = cufftExecC2C(cufPlan_j_, cutemp_, cutemp_, CUFFT_FORWARD);
+  #else
+          cufft_status = cufftExecZ2Z(cufPlan_j_, cutemp_, cutemp_, CUFFT_FORWARD);
+  #endif
+          if (cufft_status != CUFFT_SUCCESS)
+          {
+  #ifdef SINGLE
+            cerr << "Latfield2d::PlanFFT::execute : cufftExecC2C failed on component " << comp+(alignment_even ? 2 : 1) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #else
+            cerr << "Latfield2d::PlanFFT::execute : cufftExecZ2Z failed on component " << comp+(alignment_even ? 2 : 1) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #endif
+            parallel.abortForce();
+          }
+          nvtxRangePop();
+        }
+
+        if (comp + 1 < components_ || alignment_even)
+        {
+          nvtxRangePushA("PlanFFT::execute : MPI AlltoAll and Gather");
+          MPI_Alltoall(temp_, 2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, temp1_, 2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          MPI_Gather(&temp_[(r2cSize_-1)*rSizeLocal_[1]*rSizeLocal_[2]][0], 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC, &temp1_[rSize_[0]/2*rSizeLocal_[1]*rSizeLocal_[2]][0] , 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC ,parallel.grid_size()[1]-1, parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          MPI_Barrier(parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          nvtxRangePop();
+
+          success = cudaMemcpyAsync(cutemp1_, temp1_, memsize, cudaMemcpyDefault, fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaMemcpyAsync failed with error code " << success << " (" << cudaGetErrorString((cudaError_t)success) << ")" << endl;
+            parallel.abortForce();
+          }
+        }
+
+        if (comp + 1 < components_ || !alignment_even)
+        {
+          nvtxRangePushA("PlanFFT::execute : extra cudaMemcpyAsync due to interleaving");
+          success = cudaMemcpyAsync(temp_, cutemp_, memsize, cudaMemcpyDefault, fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaMemcpyAsync failed with error code " << success << " (" << cudaGetErrorString((cudaError_t)success) << ")" << endl;
+            parallel.abortForce();
+          }
+
+          success = cudaStreamSynchronize(fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaStreamSynchronize failed" << endl;
+            parallel.abortForce();
+          }
+          nvtxRangePop();
+        }
+
+        if (comp + 1 < components_ || alignment_even)
+        {
+          nvtxRangePushA("PlanFFT::execute : Transpose");
+          if(parallel.last_proc()[1])
+          {
+            for(int i=0;i<parallel.grid_size()[1];i++)
+            {
+              //transpose_0_2_last_proc(&temp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],&temp_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_],rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_);
+              transpose_0_2_last_proc(&cutemp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],&cutemp_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_],rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_, fft_stream);
+            }
+            //implement_local_0_last_proc(&temp1_[rSize_[0]/2*rSizeLocal_[1]*rSizeLocal_[2]],temp_,rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_,parallel.grid_size()[1]);
+            implement_local_0_last_proc(&cutemp1_[rSize_[0]/2*rSizeLocal_[1]*rSizeLocal_[2]],cutemp_,rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_,parallel.grid_size()[1], fft_stream);
+          }
+          else
+          {
+            for(int i=0;i<parallel.grid_size()[1];i++)
+            {
+              //transpose_0_2(&temp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],&temp_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_);
+              transpose_0_2(&cutemp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],&cutemp_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_, fft_stream);
+            }
+          }
+          nvtxRangePop();
+
+          nvtxRangePushA("PlanFFT::execute : C2C transform");
+  #ifdef SINGLE
+          cufft_status = cufftExecC2C(cufPlan_j_, cutemp_, cutemp_, CUFFT_FORWARD);
+  #else
+          cufft_status = cufftExecZ2Z(cufPlan_j_, cutemp_, cutemp_, CUFFT_FORWARD);
+  #endif
+          if (cufft_status != CUFFT_SUCCESS)
+          {
+  #ifdef SINGLE
+            cerr << "Latfield2d::PlanFFT::execute : cufftExecC2C failed on component " << comp+(alignment_even ? 1 : 2) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #else
+            cerr << "Latfield2d::PlanFFT::execute : cufftExecZ2Z failed on component " << comp+(alignment_even ? 1 : 2) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #endif
+            parallel.abortForce();
+          }
+        }
+        
+        //fftwf_execute(fPlan_j_);
+
+        if (comp + 1 < components_ || !alignment_even)
+        {
+          nvtxRangePushA("PlanFFT::execute : interleaved MPI AlltoAll");
+          MPI_Barrier(parallel.lat_world_comm());
+          MPI_Alltoall(temp_, (2*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_), MPI_DATA_PREC, temp1_, (2*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_), MPI_DATA_PREC, parallel.dim0_comm()[parallel.grid_rank()[1]]);
+          MPI_Barrier(parallel.dim0_comm()[parallel.grid_rank()[1]]);
+          nvtxRangePop();
+
+          success = cudaMemcpyAsync(cutemp1_, temp1_, memsize, cudaMemcpyDefault, fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaMemcpyAsync failed with error code " << success << " (" << cudaGetErrorString((cudaError_t)success) << ")" << endl;
+            parallel.abortForce();
+          }
+        }
+
+        if (comp + 1 < components_ || alignment_even)
+        {
+          success = cudaMemcpyAsync(temp_, cutemp_, memsize, cudaMemcpyDefault, fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaMemcpyAsync failed with error code " << success << " (" << cudaGetErrorString((cudaError_t)success) << ")" << endl;
+            parallel.abortForce();
+          }
+          nvtxRangePop();
+        }
+
+        success = cudaStreamSynchronize(fft_stream);
+        if (success != cudaSuccess)
+        {
+          cerr << "Latfield2d::PlanFFT::execute : cudaStreamSynchronize failed" << endl;
+          parallel.abortForce();
+        }
+
+        if (comp + 1 < components_ || !alignment_even)
+        {
+          nvtxRangePushA("PlanFFT::execute : interleaved transpose");
+          for(int i=0;i<parallel.grid_size()[0];i++)
+          {
+            //transpose_1_2(&temp1_[i*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_],&temp_[i*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_], r2cSizeLocal_,rSizeLocal_[2],rSizeLocal_[2]);
+            transpose_1_2(&cutemp1_[i*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_],&cutemp_[i*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_], r2cSizeLocal_,rSizeLocal_[2],rSizeLocal_[2], fft_stream);
+          }
+          nvtxRangePop();
+
+          nvtxRangePushA("PlanFFT::execute : interleaved C2C transform");
+          for(int l=0;l<rSizeLocal_[2];l++)
+          {
+            //fftwf_execute_dft(fPlan_k_,&temp_[l*r2cSizeLocal_],&temp1_[l*r2cSizeLocal_as_]);
+  #ifdef SINGLE
+            cufft_status = cufftExecC2C(cufPlan_k_, &cutemp_[l*r2cSizeLocal_], &cutemp1_[l*r2cSizeLocal_as_], CUFFT_FORWARD);
+  #else
+            cufft_status = cufftExecZ2Z(cufPlan_k_, &cutemp_[l*r2cSizeLocal_], &cutemp1_[l*r2cSizeLocal_as_], CUFFT_FORWARD);
+  #endif
+            if (cufft_status != CUFFT_SUCCESS)
+            {
+  #ifdef SINGLE
+              cerr << "Latfield2d::PlanFFT::execute : cufftExecC2C failed on component " << comp+(alignment_even ? 2 : 1) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #else
+              cerr << "Latfield2d::PlanFFT::execute : cufftExecZ2Z failed on component " << comp+(alignment_even ? 2 : 1) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #endif
+              parallel.abortForce();
+            }
+          }
+
+          if(parallel.last_proc()[1]) //fftwf_execute(fPlan_k_real_);
+          {
+  #ifdef SINGLE
+            cufft_status = cufftExecC2C(cufPlan_k_real_, &cutemp_[r2cSizeLocal_as_], &cutemp1_[r2cSizeLocal_as_*rSizeLocal_[2]*rSize_[0]], CUFFT_FORWARD);
+  #else
+            cufft_status = cufftExecZ2Z(cufPlan_k_real_, &cutemp_[r2cSizeLocal_as_], &cutemp1_[r2cSizeLocal_as_*rSizeLocal_[2]*rSize_[0]], CUFFT_FORWARD);
+  #endif
+            if (cufft_status != CUFFT_SUCCESS)
+            {
+  #ifdef SINGLE
+              cerr << "Latfield2d::PlanFFT::execute : cufftExecC2C failed on component " << comp+(alignment_even ? 2 : 1) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #else
+              cerr << "Latfield2d::PlanFFT::execute : cufftExecZ2Z failed on component " << comp+(alignment_even ? 2 : 1) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #endif
+              parallel.abortForce();
+            }
+          }
+          nvtxRangePop();
+        }
+
+        if (comp + 1 < components_ || alignment_even)
+        {
+          nvtxRangePushA("PlanFFT::execute : MPI AlltoAll");
+          MPI_Barrier(parallel.lat_world_comm());
+          MPI_Alltoall(temp_, (2*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_), MPI_DATA_PREC, temp1_, (2*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_), MPI_DATA_PREC, parallel.dim0_comm()[parallel.grid_rank()[1]]);
+          MPI_Barrier(parallel.dim0_comm()[parallel.grid_rank()[1]]);
+          nvtxRangePop();
+
+          success = cudaMemcpyAsync(cutemp_, temp1_, memsize, cudaMemcpyDefault, fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaMemcpyAsync failed with error code " << success << " (" << cudaGetErrorString((cudaError_t)success) << ")" << endl;
+            parallel.abortForce();
+          }
+        }
+
+        if (comp + 1 < components_ || !alignment_even)
+        {
+          nvtxRangePushA("PlanFFT::execute : extra cudaMemcpyAsync due to interleaving");
+          success = cudaMemcpyAsync(temp_, cutemp1_, memsize, cudaMemcpyDefault, fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaMemcpyAsync failed with error code " << success << " (" << cudaGetErrorString((cudaError_t)success) << ")" << endl;
+            parallel.abortForce();
+          }
+
+          success = cudaStreamSynchronize(fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaStreamSynchronize failed with error code " << success << " (" << cudaGetErrorString((cudaError_t)success) << ")" << endl;
+            parallel.abortForce();
+          }
+          nvtxRangePop();
+        }
+
+        if (comp + 1 < components_ || alignment_even)
+        {
+          nvtxRangePushA("PlanFFT::execute : Transpose");
+          for(int i=0;i<parallel.grid_size()[0];i++)
+          {
+            //transpose_1_2(&temp1_[i*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_],&temp_[i*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_], r2cSizeLocal_,rSizeLocal_[2],rSizeLocal_[2]);
+            transpose_1_2(&cutemp_[i*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_],&cutemp1_[i*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_], r2cSizeLocal_,rSizeLocal_[2],rSizeLocal_[2], fft_stream);
+          }
+          nvtxRangePop();
+
+          nvtxRangePushA("PlanFFT::execute : C2C transform");
+          for(int l=0;l<rSizeLocal_[2];l++)
+          {
+            //fftwf_execute_dft(fPlan_k_,&temp_[l*r2cSizeLocal_],&temp1_[l*r2cSizeLocal_as_]);
+  #ifdef SINGLE
+            cufft_status = cufftExecC2C(cufPlan_k_, &cutemp1_[l*r2cSizeLocal_], &cutemp_[l*r2cSizeLocal_as_], CUFFT_FORWARD);
+  #else
+            cufft_status = cufftExecZ2Z(cufPlan_k_, &cutemp1_[l*r2cSizeLocal_], &cutemp_[l*r2cSizeLocal_as_], CUFFT_FORWARD);
+  #endif
+            if (cufft_status != CUFFT_SUCCESS)
+            {
+  #ifdef SINGLE
+              cerr << "Latfield2d::PlanFFT::execute : cufftExecC2C failed on component " << comp+1 << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #else
+              cerr << "Latfield2d::PlanFFT::execute : cufftExecZ2Z failed on component " << comp+1 << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #endif
+              parallel.abortForce();
+            }
+          }
+
+          if(parallel.last_proc()[1]) //fftwf_execute(fPlan_k_real_);
+          {
+  #ifdef SINGLE
+            cufft_status = cufftExecC2C(cufPlan_k_real_, &cutemp1_[r2cSizeLocal_as_], &cutemp_[r2cSizeLocal_as_*rSizeLocal_[2]*rSize_[0]], CUFFT_FORWARD);
+  #else
+            cufft_status = cufftExecZ2Z(cufPlan_k_real_, &cutemp1_[r2cSizeLocal_as_], &cutemp_[r2cSizeLocal_as_*rSizeLocal_[2]*rSize_[0]], CUFFT_FORWARD);
+  #endif
+            if (cufft_status != CUFFT_SUCCESS)
+            {
+  #ifdef SINGLE
+              cerr << "Latfield2d::PlanFFT::execute : cufftExecC2C failed on component " << comp+(alignment_even ? 1 : 2) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #else
+              cerr << "Latfield2d::PlanFFT::execute : cufftExecZ2Z failed on component " << comp+(alignment_even ? 1 : 2) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #endif
+              parallel.abortForce();
+            }
+          }
+          nvtxRangePop();
+        }
+        
+        if (comp + 1 < components_ || !alignment_even)
+        {
+          nvtxRangePushA("PlanFFT::execute : interleaved MPI AlltoAll and Scatter");
+          MPI_Alltoall(temp_, 2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, temp1_, 2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          MPI_Scatter(&temp_[r2cSizeLocal_as_*rSizeLocal_[2]*rSize_[0]][0], 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC, &temp1_[(r2cSize_-1)*rSizeLocal_[1]*rSizeLocal_[2]][0] , 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC ,parallel.grid_size()[1]-1, parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          MPI_Barrier(parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          nvtxRangePop();
+
+          nvtxRangePushA("PlanFFT::execute : interleaved transpose back");
+          transpose_back_0_3(temp1_, kData_,r2cSize_,r2cSizeLocal_as_,rSizeLocal_[2],rSizeLocal_[1],parallel.grid_size()[1],kHalo_,components_,comp+(alignment_even ? 1 : 0));
+          implement_0(&temp1_[(r2cSize_-1)*rSizeLocal_[1]*rSizeLocal_[2]], kData_,r2cSize_,rSizeLocal_[2],rSizeLocal_[1],kHalo_,components_,comp+(alignment_even ? 1 : 0));
+          nvtxRangePop();
+        }
+
+        if (comp + 1 < components_ || alignment_even)
+        {
+          success = cudaMemcpyAsync(temp1_, cutemp_, memsize, cudaMemcpyDefault, fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaMemcpyAsync failed with error code " << success << " (" << cudaGetErrorString((cudaError_t)success) << ")" << endl;
+            parallel.abortForce();
+          }
+
+          success = cudaStreamSynchronize(fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaStreamSynchronize failed with error code " << success << " (" << cudaGetErrorString((cudaError_t)success) << ")" << endl;
+            parallel.abortForce();
+          }
+        }
+
+        if (comp + (alignment_even ? 2 : 3) < components_) // offload next component
+        {
+          for(int l = 0;l< rSizeLocal_[2] ;l++)
+          {
+            p_in = &rData_[rJump_[2]*l*components_ + comp + (alignment_even ? 2 : 3)];
+            p_cufft = &cutemp_[l*rSizeLocal_[1]];
+            
+#ifdef SINGLE
+            cufft_status = cufftExecR2C(cufPlan_i_, (cufftReal*)p_in, p_cufft);
+#else
+            cufft_status = cufftExecD2Z(cufPlan_i_, (cufftDoubleReal*)p_in, p_cufft);
+#endif
+            if (cufft_status != CUFFT_SUCCESS)
+            {
+#ifdef SINGLE
+              cerr << "Latfield2d::PlanFFT::execute : cufftExecR2C failed on component " << comp+(alignment_even ? 3 : 4) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+#else
+              cerr << "Latfield2d::PlanFFT::execute : cufftExecD2Z failed on component " << comp+(alignment_even ? 3 : 4) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+#endif
+              parallel.abortForce();
+            }
+          }
+        }
+
+        if (comp + 1 < components_ || alignment_even)
+        {
+          nvtxRangePushA("PlanFFT::execute : MPI AlltoAll and Scatter");
+          MPI_Alltoall(temp1_, 2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, temp_, 2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          MPI_Scatter(&temp1_[r2cSizeLocal_as_*rSizeLocal_[2]*rSize_[0]][0], 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC, &temp_[(r2cSize_-1)*rSizeLocal_[1]*rSizeLocal_[2]][0] , 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC ,parallel.grid_size()[1]-1, parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          MPI_Barrier(parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          nvtxRangePop();
+
+          nvtxRangePushA("PlanFFT::execute : Transpose back");
+          transpose_back_0_3(temp_, kData_,r2cSize_,r2cSizeLocal_as_,rSizeLocal_[2],rSizeLocal_[1],parallel.grid_size()[1],kHalo_,components_,comp+(alignment_even ? 0 : 1));
+          implement_0(&temp_[(r2cSize_-1)*rSizeLocal_[1]*rSizeLocal_[2]], kData_,r2cSize_,rSizeLocal_[2],rSizeLocal_[1],kHalo_,components_,comp+(alignment_even ? 0 : 1));
+          nvtxRangePop();
+        }
+      }
     }
     if(fft_type == FFT_BACKWARD)
     {
-      int i,j,k,comp;
-      int comm_rank;
+      //int i,j,k,comp;
+      //int comm_rank;
 
 #ifdef SINGLE
       float *p_out;
       fftwf_complex *p_in;
+      cufftComplex *cutemp_ = tempMemory.temp3();
+      cufftComplex *cutemp1_ = tempMemory.temp4();
+      cufftComplex *p_cufft;
+      long memsize = tempMemory.allocated()*sizeof(cufftComplex);
 #else
       double *p_out;
       fftw_complex *p_in;
+      cufftDoubleComplex *cutemp_ = tempMemory.temp3();
+      cufftDoubleComplex *cutemp1_ = tempMemory.temp4();
+      cufftDoubleComplex *p_cufft;
+      long memsize = tempMemory.allocated()*sizeof(cufftDoubleComplex);
 #endif
+      alignment_even = alignment_even_;
 
-      for(comp=0;comp<components_;comp++)
+      auto cufft_status = cufftSetStream(cubPlan_k_, fft_stream);
+      if (cufft_status != CUFFT_SUCCESS)
       {
-        b_arrange_data_0(kData_, temp_,kSizeLocal_[0],kSizeLocal_[1] ,kSizeLocal_[2], kHalo_, components_, comp);
-        MPI_Barrier(parallel.lat_world_comm());
+        cerr << "Latfield2d::PlanFFT::execute : cufftSetStream failed for plan k" << endl;
+        parallel.abortForce();
+      }
 
+      cufft_status = cufftSetStream(cubPlan_j_, fft_stream);
+      if (cufft_status != CUFFT_SUCCESS)
+      {
+        cerr << "Latfield2d::PlanFFT::execute : cufftSetStream failed for plan j" << endl;
+        parallel.abortForce();
+      }
 
+      cufft_status = cufftSetStream(cubPlan_j_real_, fft_stream);
+      if (cufft_status != CUFFT_SUCCESS)
+      {
+        cerr << "Latfield2d::PlanFFT::execute : cufftSetStream failed for plan j_real" << endl;
+        parallel.abortForce();
+      }
 
+      cufft_status = cufftSetStream(cubPlan_i_, fft_stream);
+      if (cufft_status != CUFFT_SUCCESS)
+      {
+        cerr << "Latfield2d::PlanFFT::execute : cufftSetStream failed for plan i_real" << endl;
+        parallel.abortForce();
+      }
 
-
-        MPI_Alltoall(temp_,2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, temp1_, 2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, parallel.dim1_comm()[parallel.grid_rank()[0]]);
-        MPI_Gather(&temp_[rSize_[0]/2*rSizeLocal_[1]*rSizeLocal_[2]][0], 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC, &temp1_[rSize_[0]/2*rSizeLocal_[1]*rSizeLocal_[2]][0] , 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC ,parallel.grid_size()[1]-1, parallel.dim1_comm()[parallel.grid_rank()[0]]);
-        MPI_Barrier(parallel.dim1_comm()[parallel.grid_rank()[0]]);
-
-
-
-        if(parallel.last_proc()[1])
+      for(int comp=0; comp<components_; comp += 2)
+      {
+        if (comp + 1 < components_ || alignment_even)
         {
-          for(i=0;i<parallel.grid_size()[1];i++)transpose_0_2_last_proc(&temp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],&temp_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_],rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_);
-          implement_local_0_last_proc(&temp1_[rSize_[0]/2*rSizeLocal_[1]*rSizeLocal_[2]],temp_,rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_,parallel.grid_size()[1]);
+          nvtxRangePushA("Latfield2d::PlanFFT::execute : MPI AlltoAll and Gather");
+          b_arrange_data_0(kData_, temp_,kSizeLocal_[0],kSizeLocal_[1] ,kSizeLocal_[2], kHalo_, components_, comp + (alignment_even ? 0 : 1));
+          MPI_Barrier(parallel.lat_world_comm());
+
+          MPI_Alltoall(temp_,2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, temp1_, 2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          MPI_Gather(&temp_[rSize_[0]/2*rSizeLocal_[1]*rSizeLocal_[2]][0], 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC, &temp1_[rSize_[0]/2*rSizeLocal_[1]*rSizeLocal_[2]][0] , 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC ,parallel.grid_size()[1]-1, parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          MPI_Barrier(parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          nvtxRangePop();
         }
-        else for(i=0;i<parallel.grid_size()[1];i++)transpose_0_2(&temp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],&temp_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_);
 
+        if (comp > 0) // deferred synchronisation
+        {
+          success = cudaStreamSynchronize(fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaStreamSynchronize failed" << endl;
+            parallel.abortForce();
+          }
+        }
 
+        if (comp + 1 < components_ || alignment_even)
+        {
+          nvtxRangePushA("Latfield2d::PlanFFT::execute : Transpose");
+          success = cudaMemcpyAsync(cutemp1_, temp1_, memsize, cudaMemcpyDefault, fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaMemcpyAsync failed with error code " << success << " (" << cudaGetErrorString((cudaError_t)success) << ")" << endl;
+            parallel.abortForce();
+          }
 
+          if(parallel.last_proc()[1])
+          {
+            for(int i=0;i<parallel.grid_size()[1];i++)
+            {
+              //transpose_0_2_last_proc(&temp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],&temp_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_],rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_);
+              transpose_0_2_last_proc(&cutemp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],&cutemp_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_],rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_, fft_stream);
+            }
+            //implement_local_0_last_proc(&temp1_[rSize_[0]/2*rSizeLocal_[1]*rSizeLocal_[2]],temp_,rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_,parallel.grid_size()[1]);
+            implement_local_0_last_proc(&cutemp1_[rSize_[0]/2*rSizeLocal_[1]*rSizeLocal_[2]],cutemp_,rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_,parallel.grid_size()[1], fft_stream);
+          }
+          else
+          {
+            for(int i=0;i<parallel.grid_size()[1];i++)
+            {
+              //transpose_0_2(&temp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],&temp_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_);
+              transpose_0_2(&cutemp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],&cutemp_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_, fft_stream);
+            }
+          }
+          nvtxRangePop();
+        }
 
+        if (comp + 1 < components_ || !alignment_even)
+        {
+          nvtxRangePushA("Latfield2d::PlanFFT::execute : interleaved b_arrange_data_0");
+          b_arrange_data_0(kData_, temp_,kSizeLocal_[0],kSizeLocal_[1] ,kSizeLocal_[2], kHalo_, components_, comp + (alignment_even ? 1 : 0));
 
+          success = cudaStreamSynchronize(fft_stream); // extra stream synchronisation before interleaved MPI
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaStreamSynchronize failed" << endl;
+            parallel.abortForce();
+          }
+          nvtxRangePop();
+        }
 
+        if (comp + 1 < components_ || alignment_even)
+        {
+          nvtxRangePushA("Latfield2d::PlanFFT::execute : C2C transform");
+  #ifdef SINGLE
+          //fftwf_execute(bPlan_k_);
+          cufft_status = cufftExecC2C(cubPlan_k_, cutemp_, cutemp_, CUFFT_INVERSE);
+  #else
+          cufft_status = cufftExecZ2Z(cubPlan_k_, cutemp_, cutemp_, CUFFT_INVERSE);
+  #endif
+          if (cufft_status != CUFFT_SUCCESS)
+          {
+  #ifdef SINGLE
+            cerr << "Latfield2d::PlanFFT::execute : cufftExecC2C failed on component " << comp+(alignment_even ? 1 : 2) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #else
+            cerr << "Latfield2d::PlanFFT::execute : cufftExecZ2Z failed on component " << comp+(alignment_even ? 1 : 2) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #endif
+            parallel.abortForce();
+          }
+          //fftwf_execute(fPlan_j_);
+          nvtxRangePop();
+        }
+
+        if (comp + 1 < components_ || !alignment_even)
+        {
+          nvtxRangePushA("Latfield2d::PlanFFT::execute : interleaved MPI AlltoAll and Gather");
+          MPI_Barrier(parallel.lat_world_comm());
+
+          MPI_Alltoall(temp_,2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, temp1_, 2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          MPI_Gather(&temp_[rSize_[0]/2*rSizeLocal_[1]*rSizeLocal_[2]][0], 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC, &temp1_[rSize_[0]/2*rSizeLocal_[1]*rSizeLocal_[2]][0] , 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC ,parallel.grid_size()[1]-1, parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          MPI_Barrier(parallel.dim1_comm()[parallel.grid_rank()[0]]);
+
+          success = cudaMemcpyAsync(cutemp1_, temp1_, memsize, cudaMemcpyDefault, fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaMemcpyAsync failed with error code " << success << " (" << cudaGetErrorString((cudaError_t)success) << ")" << endl;
+            parallel.abortForce();
+          }
+          nvtxRangePop();
+        }
+
+        if (comp + 1 < components_ || alignment_even)
+        {
+          success = cudaMemcpyAsync(temp_, cutemp_, memsize, cudaMemcpyDefault, fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaMemcpyAsync failed with error code " << success << " (" << cudaGetErrorString((cudaError_t)success) << ")" << endl;
+            parallel.abortForce();
+          }
+        }
+
+        success = cudaStreamSynchronize(fft_stream);
+        if (success != cudaSuccess)
+        {
+          cerr << "Latfield2d::PlanFFT::execute : cudaStreamSynchronize failed" << endl;
+          parallel.abortForce();
+        }
+
+        if (comp + 1 < components_ || !alignment_even)
+        {
+          nvtxRangePushA("Latfield2d::PlanFFT::execute : interleaved transpose");
+          if(parallel.last_proc()[1])
+          {
+            for(int i=0;i<parallel.grid_size()[1];i++)
+            {
+              //transpose_0_2_last_proc(&temp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],&temp_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_],rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_);
+              transpose_0_2_last_proc(&cutemp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],&cutemp_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_],rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_, fft_stream);
+            }
+            //implement_local_0_last_proc(&temp1_[rSize_[0]/2*rSizeLocal_[1]*rSizeLocal_[2]],temp_,rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_,parallel.grid_size()[1]);
+            implement_local_0_last_proc(&cutemp1_[rSize_[0]/2*rSizeLocal_[1]*rSizeLocal_[2]],cutemp_,rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_,parallel.grid_size()[1], fft_stream);
+          }
+          else
+          {
+            for(int i=0;i<parallel.grid_size()[1];i++)
+            {
+              //transpose_0_2(&temp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],&temp_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_);
+              transpose_0_2(&cutemp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],&cutemp_[i*rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_],rSizeLocal_[1],rSizeLocal_[2],r2cSizeLocal_as_, fft_stream);
+            }
+          }
+          nvtxRangePop();
+          nvtxRangePushA("Latfield2d::PlanFFT::execute : interleaved C2C transform");
+  #ifdef SINGLE
+          //fftwf_execute(bPlan_k_);
+          cufft_status = cufftExecC2C(cubPlan_k_, cutemp_, cutemp_, CUFFT_INVERSE);
+  #else
+          cufft_status = cufftExecZ2Z(cubPlan_k_, cutemp_, cutemp_, CUFFT_INVERSE);
+  #endif
+          if (cufft_status != CUFFT_SUCCESS)
+          {
+  #ifdef SINGLE
+            cerr << "Latfield2d::PlanFFT::execute : cufftExecC2C failed on component " << comp+(alignment_even ? 2 : 1) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #else
+            cerr << "Latfield2d::PlanFFT::execute : cufftExecZ2Z failed on component " << comp+(alignment_even ? 2 : 1) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #endif
+            parallel.abortForce();
+          }
+          nvtxRangePop();
+        }
+
+        if (comp + 1 < components_ || alignment_even)
+        {
+          nvtxRangePushA("Latfield2d::PlanFFT::execute : MPI AlltoAll");
+          MPI_Alltoall(temp_, (2*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_), MPI_DATA_PREC, temp1_, (2*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_), MPI_DATA_PREC, parallel.dim0_comm()[parallel.grid_rank()[1]]);
+          MPI_Barrier(parallel.dim0_comm()[parallel.grid_rank()[1]]);
+          nvtxRangePop();
+
+          success = cudaMemcpyAsync(cutemp1_, temp1_, memsize, cudaMemcpyDefault, fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaMemcpyAsync failed with error code " << success << " (" << cudaGetErrorString((cudaError_t)success) << ")" << endl;
+            parallel.abortForce();
+          }
+        }
+
+        if (comp + 1 < components_ || !alignment_even)
+        {
+          success = cudaMemcpyAsync(temp_, cutemp_, memsize, cudaMemcpyDefault, fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaMemcpyAsync failed with error code " << success << " (" << cudaGetErrorString((cudaError_t)success) << ")" << endl;
+            parallel.abortForce();
+          }
+
+          success = cudaStreamSynchronize(fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaStreamSynchronize failed" << endl;
+            parallel.abortForce();
+          }
+        }
+
+        if (comp + 1 < components_ || alignment_even)
+        {
+          nvtxRangePushA("Latfield2d::PlanFFT::execute : Transpose");
+          for(int i=0;i<parallel.grid_size()[0];i++)
+          {
+            //transpose_1_2(&temp1_[i*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_],&temp_[i*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_], r2cSizeLocal_,rSizeLocal_[2],rSizeLocal_[2]);
+            transpose_1_2(&cutemp1_[i*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_],&cutemp_[i*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_], r2cSizeLocal_,rSizeLocal_[2],rSizeLocal_[2], fft_stream);
+          }
+          nvtxRangePop();
+
+          nvtxRangePushA("Latfield2d::PlanFFT::execute : C2C transform");
+          for(int l=0;l<rSizeLocal_[2];l++)
+          {
+            //fftwf_execute_dft(bPlan_j_,&temp_[l*r2cSizeLocal_],&temp1_[l*r2cSizeLocal_as_]);
+  #ifdef SINGLE
+            cufft_status = cufftExecC2C(cubPlan_j_, &cutemp_[l*r2cSizeLocal_], &cutemp1_[l*r2cSizeLocal_as_], CUFFT_INVERSE);
+  #else
+            cufft_status = cufftExecZ2Z(cubPlan_j_, &cutemp_[l*r2cSizeLocal_], &cutemp1_[l*r2cSizeLocal_as_], CUFFT_INVERSE);
+  #endif
+            if (cufft_status != CUFFT_SUCCESS)
+            {
+  #ifdef SINGLE
+              cerr << "Latfield2d::PlanFFT::execute : cufftExecC2C failed on component " << comp+(alignment_even ? 1 : 2) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #else
+              cerr << "Latfield2d::PlanFFT::execute : cufftExecZ2Z failed on component " << comp+(alignment_even ? 1 : 2) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #endif
+              parallel.abortForce();
+            }
+          }
+
+          if(parallel.last_proc()[1])
+          {
+            //fftwf_execute(bPlan_j_real_);
+  #ifdef SINGLE
+            cufft_status = cufftExecC2C(cubPlan_j_real_, &cutemp_[r2cSizeLocal_as_], &cutemp1_[r2cSizeLocal_as_*rSizeLocal_[2]*rSize_[0]], CUFFT_INVERSE);
+  #else
+            cufft_status = cufftExecZ2Z(cubPlan_j_real_, &cutemp_[r2cSizeLocal_as_], &cutemp1_[r2cSizeLocal_as_*rSizeLocal_[2]*rSize_[0]], CUFFT_INVERSE);
+  #endif
+            if (cufft_status != CUFFT_SUCCESS)
+            {
+  #ifdef SINGLE
+              cerr << "Latfield2d::PlanFFT::execute : cufftExecC2C failed on component " << comp+(alignment_even ? 1 : 2) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #else
+              cerr << "Latfield2d::PlanFFT::execute : cufftExecZ2Z failed on component " << comp+(alignment_even ? 1 : 2) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #endif
+              parallel.abortForce();
+            }
+          }
+        }
+
+        if (comp + 1 < components_ || !alignment_even)
+        {
+          nvtxRangePushA("Latfield2d::PlanFFT::execute : interleaved MPI AlltoAll");
+          MPI_Alltoall(temp_, (2*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_), MPI_DATA_PREC, temp1_, (2*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_), MPI_DATA_PREC, parallel.dim0_comm()[parallel.grid_rank()[1]]);
+          MPI_Barrier(parallel.dim0_comm()[parallel.grid_rank()[1]]);
+          nvtxRangePop();
+
+          success = cudaMemcpyAsync(cutemp_, temp1_, memsize, cudaMemcpyDefault, fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaMemcpyAsync failed with error code " << success << " (" << cudaGetErrorString((cudaError_t)success) << ")" << endl;
+            parallel.abortForce();
+          }
+        }
+
+        if (comp + 1 < components_ || alignment_even)
+        {
+          success = cudaMemcpyAsync(temp_, cutemp1_, memsize, cudaMemcpyDefault, fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaMemcpyAsync failed with error code " << success << " (" << cudaGetErrorString((cudaError_t)success) << ")" << endl;
+            parallel.abortForce();
+          }
+        }
+
+        success = cudaStreamSynchronize(fft_stream);
+        if (success != cudaSuccess)
+        {
+          cerr << "Latfield2d::PlanFFT::execute : cudaStreamSynchronize failed" << endl;
+          parallel.abortForce();
+        }
+        nvtxRangePop();
+
+        if (comp + 1 < components_ || !alignment_even)
+        {
+          nvtxRangePushA("Latfield2d::PlanFFT::execute : interleaved transpose");
+          for(int i=0;i<parallel.grid_size()[0];i++)
+          {
+            //transpose_1_2(&temp1_[i*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_],&temp_[i*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_], r2cSizeLocal_,rSizeLocal_[2],rSizeLocal_[2]);
+            transpose_1_2(&cutemp_[i*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_],&cutemp1_[i*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_], r2cSizeLocal_,rSizeLocal_[2],rSizeLocal_[2], fft_stream);
+          }
+          nvtxRangePop();
+
+          nvtxRangePushA("Latfield2d::PlanFFT::execute : interleaved C2C transform");
+          for(int l=0;l<rSizeLocal_[2];l++)
+          {
+            //fftwf_execute_dft(bPlan_j_,&temp_[l*r2cSizeLocal_],&temp1_[l*r2cSizeLocal_as_]);
 #ifdef SINGLE
-        fftwf_execute(bPlan_k_);
+            cufft_status = cufftExecC2C(cubPlan_j_, &cutemp1_[l*r2cSizeLocal_], &cutemp_[l*r2cSizeLocal_as_], CUFFT_INVERSE);
 #else
-        fftw_execute(bPlan_k_);
+            cufft_status = cufftExecZ2Z(cubPlan_j_, &cutemp1_[l*r2cSizeLocal_], &cutemp_[l*r2cSizeLocal_as_], CUFFT_INVERSE);
 #endif
-
-
-        MPI_Alltoall(temp_, (2*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_), MPI_DATA_PREC, temp1_, (2*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_), MPI_DATA_PREC, parallel.dim0_comm()[parallel.grid_rank()[1]]);
-        MPI_Barrier(parallel.dim0_comm()[parallel.grid_rank()[1]]);
-
-
-        for(i=0;i<parallel.grid_size()[0];i++)transpose_1_2(&temp1_[i*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_],&temp_[i*rSizeLocal_[2]*rSizeLocal_[2]*r2cSizeLocal_], r2cSizeLocal_,rSizeLocal_[2],rSizeLocal_[2]);
-
-
-
+            if (cufft_status != CUFFT_SUCCESS)
+            {
 #ifdef SINGLE
-
-        for(int l=0;l<rSizeLocal_[2];l++)
-        {
-          fftwf_execute_dft(bPlan_j_,&temp_[l*r2cSizeLocal_],&temp1_[l*r2cSizeLocal_as_]);
-        }
-
-        if(parallel.last_proc()[1])fftwf_execute(bPlan_j_real_);
-
+              cerr << "Latfield2d::PlanFFT::execute : cufftExecC2C failed on component " << comp+2 << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
 #else
-        for(int l=0;l<rSizeLocal_[2];l++)
-        {
-          fftw_execute_dft(bPlan_j_,&temp_[l*r2cSizeLocal_],&temp1_[l*r2cSizeLocal_as_]);
-        }
-
-        if(parallel.last_proc()[1])fftw_execute(bPlan_j_real_);
+              cerr << "Latfield2d::PlanFFT::execute : cufftExecZ2Z failed on component " << comp+2 << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
 #endif
+              parallel.abortForce();
+            }
+          }
 
-
-
-
-
-        MPI_Alltoall(temp1_, 2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, temp_, 2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, parallel.dim1_comm()[parallel.grid_rank()[0]]);
-        MPI_Scatter(&temp1_[r2cSizeLocal_as_*rSizeLocal_[2]*rSize_[0]][0], 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC, &temp_[(r2cSize_-1)*rSizeLocal_[1]*rSizeLocal_[2]][0] , 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC ,parallel.grid_size()[1]-1, parallel.dim1_comm()[parallel.grid_rank()[0]]);
-        MPI_Barrier(parallel.dim1_comm()[parallel.grid_rank()[0]]);
-
-
-
-        b_transpose_back_0_1(temp_, temp1_,r2cSize_,r2cSizeLocal_as_,rSizeLocal_[2],rSizeLocal_[1],parallel.grid_size()[1]);
-        b_implement_0(&temp_[(r2cSize_-1)*rSizeLocal_[1]*rSizeLocal_[2]], temp1_,r2cSize_,rSizeLocal_[2],rSizeLocal_[1]);
-
-
+          if(parallel.last_proc()[1])
+          {
+            //fftwf_execute(bPlan_j_real_);
 #ifdef SINGLE
-        for(int l = 0;l< rSizeLocal_[2] ;l++)
-        {
-          p_in = &temp1_[ l*r2cSize_*rSizeLocal_[1] ];
-          p_out = &rData_[l*rJump_[2]*components_ + comp];
-          fftwf_execute_dft_c2r(bPlan_i_,p_in,p_out);
-        }
+            cufft_status = cufftExecC2C(cubPlan_j_real_, &cutemp1_[r2cSizeLocal_as_], &cutemp_[r2cSizeLocal_as_*rSizeLocal_[2]*rSize_[0]], CUFFT_INVERSE);
 #else
-        for(int l = 0;l< rSizeLocal_[2] ;l++)
-        {
-          p_in = &temp1_[ l*r2cSize_*rSizeLocal_[1] ];
-          p_out = &rData_[l*rJump_[2]*components_ + comp];
-          fftw_execute_dft_c2r(bPlan_i_,p_in,p_out);
-        }
+            cufft_status = cufftExecZ2Z(cubPlan_j_real_, &cutemp1_[r2cSizeLocal_as_], &cutemp_[r2cSizeLocal_as_*rSizeLocal_[2]*rSize_[0]], CUFFT_INVERSE);
 #endif
+            if (cufft_status != CUFFT_SUCCESS)
+            {
+#ifdef SINGLE
+              cerr << "Latfield2d::PlanFFT::execute : cufftExecC2C failed on component " << comp+(alignment_even ? 2 : 1) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+#else
+              cerr << "Latfield2d::PlanFFT::execute : cufftExecZ2Z failed on component " << comp+(alignment_even ? 2 : 1) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+#endif
+              parallel.abortForce();
+            }
+          }
+          nvtxRangePop();
+        }
 
+        if (comp + 1 < components_ || alignment_even)
+        {
+          nvtxRangePushA("Latfield2d::PlanFFT::execute : MPI AlltoAll and Scatter");
+          MPI_Alltoall(temp_, 2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, temp1_, 2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          MPI_Scatter(&temp_[r2cSizeLocal_as_*rSizeLocal_[2]*rSize_[0]][0], 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC, &temp1_[(r2cSize_-1)*rSizeLocal_[1]*rSizeLocal_[2]][0] , 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC ,parallel.grid_size()[1]-1, parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          MPI_Barrier(parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          nvtxRangePop();
+          
+          success = cudaMemcpyAsync(cutemp1_, temp1_, memsize, cudaMemcpyDefault, fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaMemcpyAsync failed with error code " << success << " (" << cudaGetErrorString((cudaError_t)success) << ")" << endl;
+            parallel.abortForce();
+          }
+        }
 
+        if (comp + 1 < components_ || !alignment_even)
+        {
+          success = cudaMemcpyAsync(temp_, cutemp_, memsize, cudaMemcpyDefault, fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaMemcpyAsync failed with error code " << success << " (" << cudaGetErrorString((cudaError_t)success) << ")" << endl;
+            parallel.abortForce();
+          }
+
+          success = cudaStreamSynchronize(fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaStreamSynchronize failed" << endl;
+            parallel.abortForce();
+          }
+        }
+
+        if (comp + 1 < components_ || alignment_even)
+        {
+          nvtxRangePushA("Latfield2d::PlanFFT::execute : Transpose");
+          b_transpose_back_0_1(cutemp1_, cutemp_,r2cSize_,r2cSizeLocal_as_,rSizeLocal_[2],rSizeLocal_[1],parallel.grid_size()[1], fft_stream);
+          b_implement_0(&cutemp1_[(r2cSize_-1)*rSizeLocal_[1]*rSizeLocal_[2]], cutemp_,r2cSize_,rSizeLocal_[2],rSizeLocal_[1], fft_stream);      
+          nvtxRangePop();
+
+          nvtxRangePushA("Latfield2d::PlanFFT::execute : C2R transform");
+          for(int l = 0;l< rSizeLocal_[2] ;l++)
+          {
+            p_cufft = &cutemp_[ l*r2cSize_*rSizeLocal_[1] ];
+            p_out = &rData_[l*rJump_[2]*components_ + comp + (alignment_even ? 0 : 1)];
+
+  #ifdef SINGLE
+            cufft_status = cufftExecC2R(cubPlan_i_, p_cufft, (cufftReal*) p_out);
+  #else
+            cufft_status = cufftExecZ2D(cubPlan_i_, p_cufft, (cufftDoubleReal*) p_out);
+  #endif
+            if (cufft_status != CUFFT_SUCCESS)
+            {
+  #ifdef SINGLE
+              cerr << "Latfield2d::PlanFFT::execute : cufftExecC2R failed on component " << comp+(alignment_even ? 1 : 2) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #else
+              cerr << "Latfield2d::PlanFFT::execute : cufftExecZ2D failed on component " << comp+(alignment_even ? 1 : 2) << "/" << components_ << " with error code " << cufft_status << " (" << cufftGetErrorString(cufft_status) << ")" << endl;
+  #endif
+              parallel.abortForce();
+            }
+          }
+          nvtxRangePop();
+        }
+
+        if (comp + 1 < components_ || !alignment_even)
+        {
+          nvtxRangePushA("Latfield2d::PlanFFT::execute : interleaved MPI AlltoAll and Scatter");
+          MPI_Alltoall(temp_, 2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, temp1_, 2* rSizeLocal_[1]*rSizeLocal_[2]*r2cSizeLocal_as_, MPI_DATA_PREC, parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          MPI_Scatter(&temp_[r2cSizeLocal_as_*rSizeLocal_[2]*rSize_[0]][0], 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC, &temp1_[(r2cSize_-1)*rSizeLocal_[1]*rSizeLocal_[2]][0] , 2*rSizeLocal_[1]*rSizeLocal_[2], MPI_DATA_PREC ,parallel.grid_size()[1]-1, parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          MPI_Barrier(parallel.dim1_comm()[parallel.grid_rank()[0]]);
+          nvtxRangePop();
+
+          nvtxRangePushA("Latfield2d::PlanFFT::execute : interleaved transpose");
+          b_transpose_back_0_1(temp1_, temp_,r2cSize_,r2cSizeLocal_as_,rSizeLocal_[2],rSizeLocal_[1],parallel.grid_size()[1]);
+          b_implement_0(&temp1_[(r2cSize_-1)*rSizeLocal_[1]*rSizeLocal_[2]], temp_,r2cSize_,rSizeLocal_[2],rSizeLocal_[1]);
+          nvtxRangePop();
+
+          nvtxRangePushA("Latfield2d::PlanFFT::execute : interleaved C2R transform");
+#pragma omp parallel for private(p_in, p_out)
+          for(int l = 0;l< rSizeLocal_[2] ;l++)
+          {
+            p_in = &temp_[ l*r2cSize_*rSizeLocal_[1] ];
+            p_out = &rData_[l*rJump_[2]*components_ + comp + (alignment_even ? 1 : 0)];
+#ifdef SINGLE
+            fftwf_execute_dft_c2r(bPlan_i_,p_in,p_out);
+#else
+            fftw_execute_dft_c2r(bPlan_i_,p_in,p_out);
+#endif
+          }
+          nvtxRangePop();
+        }
+
+        if (comp + 2 >= components_ && (comp + 1 < components_ || alignment_even)) // defer synchronisation
+        {
+          success = cudaStreamSynchronize(fft_stream);
+          if (success != cudaSuccess)
+          {
+            cerr << "Latfield2d::PlanFFT::execute : cudaStreamSynchronize failed" << endl;
+            parallel.abortForce();
+          }
+        }
       }
     }
 
@@ -1062,9 +2096,9 @@ void PlanFFT<compType>::execute(int fft_type)
     		if(fft_type == FFT_FORWARD)
   			{
 
-  			   int i,j,k;
-  				 int comp;
-  				 int comm_rank;
+  			   //int i,j,k;
+  				 //int comp;
+  				 //int comm_rank;
 
   #ifdef SINGLE
   				 fftwf_complex *p_in;
@@ -1074,7 +2108,7 @@ void PlanFFT<compType>::execute(int fft_type)
   				 fftw_complex *p_out;
   #endif
 
-  				 for(comp=0;comp<components_;comp++)
+  				 for(int comp=0; comp<components_; comp++)
   				 {
 
   					for(int l = 0;l< rSizeLocal_[2] ;l++)
@@ -1093,7 +2127,7 @@ void PlanFFT<compType>::execute(int fft_type)
 
   				   MPI_Alltoall(temp_, 2* rSizeLocal_[1]*rSizeLocal_[2]*rSizeLocal_[1], MPI_DATA_PREC, temp1_, 2* rSizeLocal_[1]*rSizeLocal_[2]*rSizeLocal_[1], MPI_DATA_PREC, parallel.dim1_comm()[parallel.grid_rank()[0]]);
 
-  				   for(i=0;i<parallel.grid_size()[1];i++)transpose_0_2(&temp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*rSizeLocal_[1]],&temp_[i*rSizeLocal_[1]*rSizeLocal_[2]*rSizeLocal_[1]],rSizeLocal_[1],rSizeLocal_[2],rSizeLocal_[1]);
+  				   for(int i=0;i<parallel.grid_size()[1];i++)transpose_0_2(&temp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*rSizeLocal_[1]],&temp_[i*rSizeLocal_[1]*rSizeLocal_[2]*rSizeLocal_[1]],rSizeLocal_[1],rSizeLocal_[2],rSizeLocal_[1]);
 
   #ifdef SINGLE
   				   fftwf_execute(fPlan_j_);
@@ -1104,7 +2138,7 @@ void PlanFFT<compType>::execute(int fft_type)
 
   				   MPI_Alltoall(temp_,2*rSizeLocal_[2]*rSizeLocal_[2]*rSizeLocal_[1],MPI_DATA_PREC,temp1_,2*rSizeLocal_[2]*rSizeLocal_[2]*rSizeLocal_[1], MPI_DATA_PREC, parallel.dim0_comm()[parallel.grid_rank()[1]]);
 
-  				   for(i=0;i<parallel.grid_size()[0];i++)transpose_1_2(&temp1_[i*rSizeLocal_[2]*rSizeLocal_[2]*rSizeLocal_[1]],&temp_[i*rSizeLocal_[2]*rSizeLocal_[2]*rSizeLocal_[1]], rSizeLocal_[1],rSizeLocal_[2],rSizeLocal_[2]);
+  				   for(int i=0;i<parallel.grid_size()[0];i++)transpose_1_2(&temp1_[i*rSizeLocal_[2]*rSizeLocal_[2]*rSizeLocal_[1]],&temp_[i*rSizeLocal_[2]*rSizeLocal_[2]*rSizeLocal_[1]], rSizeLocal_[1],rSizeLocal_[2],rSizeLocal_[2]);
 
 
   				  for(int l = 0;l< rSizeLocal_[2] ;l++)
@@ -1129,9 +2163,9 @@ void PlanFFT<compType>::execute(int fft_type)
   			if(fft_type == FFT_BACKWARD)
   			{
 
-  			   int i,j,k;
-  				 int comp;
-  				 int comm_rank;
+  			   //int i,j,k;
+  				 //int comp;
+  				 //int comm_rank;
 
   #ifdef SINGLE
   				 fftwf_complex *p_in;
@@ -1143,7 +2177,7 @@ void PlanFFT<compType>::execute(int fft_type)
 
   				 //STEP 1 : SAME AS STEP ONE OF FORWARD
 
-  				  for(comp=0;comp<components_;comp++)
+  				for(int comp=0; comp<components_; comp++)
   				 {
   					for(int l = 0;l< rSizeLocal_[2] ;l++)
   					{
@@ -1176,7 +2210,7 @@ void PlanFFT<compType>::execute(int fft_type)
 
   				   MPI_Alltoall(temp_, 2* rSizeLocal_[1]*rSizeLocal_[2]*rSizeLocal_[1], MPI_DATA_PREC, temp1_, 2* rSizeLocal_[1]*rSizeLocal_[2]*rSizeLocal_[1], MPI_DATA_PREC, parallel.dim1_comm()[parallel.grid_rank()[0]]);
 
-  				   for(i=0;i<parallel.grid_size()[1];i++)transpose_0_2(&temp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*rSizeLocal_[1]],&temp_[i*rSizeLocal_[1]*rSizeLocal_[2]*rSizeLocal_[1]],rSizeLocal_[1],rSizeLocal_[2],rSizeLocal_[1]);
+  				   for(int i=0;i<parallel.grid_size()[1];i++)transpose_0_2(&temp1_[i*rSizeLocal_[1]*rSizeLocal_[2]*rSizeLocal_[1]],&temp_[i*rSizeLocal_[1]*rSizeLocal_[2]*rSizeLocal_[1]],rSizeLocal_[1],rSizeLocal_[2],rSizeLocal_[1]);
 
 
   				    for(int l = 0;l< rSizeLocal_[2] ;l++)
@@ -1197,9 +2231,12 @@ void PlanFFT<compType>::execute(int fft_type)
   			}
       }
 
-
-
-
+  success = cudaStreamDestroy(fft_stream);
+  if (success != cudaSuccess)
+  {
+    cerr << "Latfield2d::PlanFFT::execute : cudaStreamDestroy failed" << endl;
+    parallel.abortForce(); 
+  }
 }
 
 //transposition function
@@ -1209,12 +2246,13 @@ void PlanFFT<compType>::execute(int fft_type)
 template<class compType>
 void PlanFFT<compType>::transpose_0_2( fftwf_complex * in, fftwf_complex * out,int dim_i,int dim_j ,int dim_k)
 {
-  int i,j,k;
-  for(i=0;i<dim_i;i++)
+  //int i,j,k;
+  #pragma omp parallel for collapse(3)
+  for(int i=0;i<dim_i;i++)
   {
-    for(j=0;j<dim_j;j++)
+    for(int j=0;j<dim_j;j++)
     {
-      for(k=0;k<dim_k;k++)
+      for(int k=0;k<dim_k;k++)
       {
 
         out[k+dim_k*(j+i*dim_j)][0]=in[i+dim_i*(j+k*dim_j)][0];
@@ -1226,15 +2264,33 @@ void PlanFFT<compType>::transpose_0_2( fftwf_complex * in, fftwf_complex * out,i
 
 }
 
+__global__ void transpose_0_2_kernel(cufftComplex * in, cufftComplex * out, int dim_i, int dim_j, int dim_k)
+{
+  int i = blockIdx.x;
+  int j = blockIdx.y;
+
+  for (int k = threadIdx.x; k < dim_k; k += 128)
+  {
+    out[k + dim_k * (j + i * dim_j)] = in[i + dim_i * (j + k * dim_j)];
+  }
+}
+
+template<class compType>
+void PlanFFT<compType>::transpose_0_2( cufftComplex * in, cufftComplex * out, int dim_i, int dim_j, int dim_k, cudaStream_t &stream)
+{
+  transpose_0_2_kernel<<<dim3(dim_i, dim_j), 128, 0, stream>>>(in, out, dim_i, dim_j, dim_k);
+}
+
 template<class compType>
 void PlanFFT<compType>::transpose_0_2_last_proc( fftwf_complex * in, fftwf_complex * out,int dim_i,int dim_j ,int dim_k)
 {
-  int i,j,k;
-  for(i=0;i<dim_i;i++)
+  //int i,j,k;
+  #pragma omp parallel for collapse(3)
+  for(int i=0;i<dim_i;i++)
   {
-    for(j=0;j<dim_j;j++)
+    for(int j=0;j<dim_j;j++)
     {
-      for(k=0;k<dim_k;k++)
+      for(int k=0;k<dim_k;k++)
       {
         out[k+(dim_k+1)*(j+i*dim_j)][0]=in[i+dim_i*(j+k*dim_j)][0];
         out[k+(dim_k+1)*(j+i*dim_j)][1]=in[i+dim_i*(j+k*dim_j)][1];
@@ -1243,17 +2299,35 @@ void PlanFFT<compType>::transpose_0_2_last_proc( fftwf_complex * in, fftwf_compl
   }
 }
 
+__global__ void transpose_0_2_last_proc_kernel(cufftComplex * in, cufftComplex * out, int dim_i, int dim_j, int dim_k)
+{
+  int i = blockIdx.x;
+  int j = blockIdx.y;
+
+  for (int k = threadIdx.x; k < dim_k; k += 128)
+  {
+    out[k + (dim_k + 1) * (j + i * dim_j)] = in[i + dim_i * (j + k * dim_j)];
+  }
+}
+
+template<class compType>
+void PlanFFT<compType>::transpose_0_2_last_proc( cufftComplex * in, cufftComplex * out,int dim_i,int dim_j ,int dim_k, cudaStream_t &stream)
+{
+  transpose_0_2_last_proc_kernel<<<dim3(dim_i, dim_j), 128, 0, stream>>>(in, out, dim_i, dim_j, dim_k);
+}
+
 template<class compType>
 void PlanFFT<compType>::implement_local_0_last_proc( fftwf_complex * in, fftwf_complex * out,int proc_dim_i,int proc_dim_j,int proc_dim_k,int proc_size)
 {
-  int i_in,i_out,j,rank;
-  for(i_in=0;i_in<proc_dim_i;i_in++)
+  //int i_in,i_out,j,rank;
+  #pragma omp parallel for collapse(3)
+  for(int i_in=0;i_in<proc_dim_i;i_in++)
   {
-    for(j=0;j<proc_dim_j;j++)
+    for(int j=0;j<proc_dim_j;j++)
     {
-      for(rank=0;rank<proc_size;rank++)
+      for(int rank=0;rank<proc_size;rank++)
       {
-        i_out=i_in+rank*proc_dim_i;
+        int i_out=i_in+rank*proc_dim_i;
         out[proc_dim_k + (proc_dim_k+1)*(j+i_out*proc_dim_j)][0]=in[i_in+proc_dim_i*(j+proc_dim_j*rank)][0];
         out[proc_dim_k + (proc_dim_k+1)*(j+i_out*proc_dim_j)][1]=in[i_in+proc_dim_i*(j+proc_dim_j*rank)][1];
       }
@@ -1261,16 +2335,34 @@ void PlanFFT<compType>::implement_local_0_last_proc( fftwf_complex * in, fftwf_c
   }
 }
 
+__global__ void implement_local_0_last_proc_kernel(cufftComplex * in, cufftComplex * out, int proc_dim_i, int proc_dim_j, int proc_dim_k)
+{
+  int rank = blockIdx.x;
+  int j = blockIdx.y;
+
+  for (int i_in = threadIdx.x; i_in < proc_dim_i; i_in += 128)
+  {
+    int i_out = i_in + rank * proc_dim_i;
+    out[proc_dim_k + (proc_dim_k + 1) * (j + i_out * proc_dim_j)] = in[i_in + proc_dim_i * (j + proc_dim_j * rank)];
+  }
+}
+
+template<class compType>
+void PlanFFT<compType>::implement_local_0_last_proc( cufftComplex * in, cufftComplex * out,int proc_dim_i,int proc_dim_j,int proc_dim_k,int proc_size, cudaStream_t &stream)
+{
+  implement_local_0_last_proc_kernel<<<dim3(proc_size, proc_dim_j), 128, 0, stream>>>(in, out, proc_dim_i, proc_dim_j, proc_dim_k);
+}
 
 template<class compType>
 void PlanFFT<compType>::transpose_1_2(fftwf_complex * in , fftwf_complex * out ,int dim_i,int dim_j ,int dim_k )
 {
-  int i,j,k;
-  for(i=0;i<dim_i;i++)
+  //int i,j,k;
+  #pragma omp parallel for collapse(3)
+  for(int i=0;i<dim_i;i++)
   {
-    for(j=0;j<dim_j;j++)
+    for(int j=0;j<dim_j;j++)
     {
-      for(k=0;k<dim_k;k++)
+      for(int k=0;k<dim_k;k++)
       {
         out[i+dim_i*(k+j*dim_k)][0]=in[i+dim_i*(j+k*dim_j)][0];
         out[i+dim_i*(k+j*dim_k)][1]=in[i+dim_i*(j+k*dim_j)][1];
@@ -1279,23 +2371,42 @@ void PlanFFT<compType>::transpose_1_2(fftwf_complex * in , fftwf_complex * out ,
   }
 }
 
+__global__ void transpose_1_2_kernel(cufftComplex * in, cufftComplex * out, int dim_i, int dim_j, int dim_k)
+{
+  int i = blockIdx.x;
+  int j = blockIdx.y;
+
+  for (int k = threadIdx.x; k < dim_k; k += 128)
+  {
+    out[i + dim_i * (k + j * dim_k)] = in[i + dim_i * (j + k * dim_j)];
+  }
+}
+
+template<class compType>
+void PlanFFT<compType>::transpose_1_2(cufftComplex * in , cufftComplex * out  ,int dim_i,int dim_j ,int dim_k, cudaStream_t &stream)
+{
+  transpose_1_2_kernel<<<dim3(dim_i, dim_j), 128, 0, stream>>>(in, out, dim_i, dim_j, dim_k);
+}
+
 template<class compType>
 void PlanFFT<compType>::transpose_back_0_3( fftwf_complex * in, fftwf_complex * out,int r2c,int local_r2c,int local_size_j,int local_size_k,int proc_size,int halo,int components, int comp)
 {
-  int i,j,k,l, i_t, j_t, k_t;
+  //int i,j,k,l, i_t, j_t, k_t;
   int r2c_halo = r2c + 2*halo;
   int local_size_k_halo = local_size_k + 2*halo;
-  for (i=0;i<local_r2c;i++)
+
+  #pragma omp parallel for collapse(4) default(shared)
+  for (int i=0;i<local_r2c;i++)
   {
-    for(k=0;k<local_size_k;k++)
+    for(int k=0;k<local_size_k;k++)
     {
-      for(j=0;j<local_size_j;j++)
+      for(int j=0;j<local_size_j;j++)
       {
-        for(l=0;l<proc_size;l++)
+        for(int l=0;l<proc_size;l++)
         {
-          i_t = i + l*local_r2c;
-          j_t = j ;
-          k_t = k ;
+          int i_t = i + l*local_r2c;
+          int j_t = j ;
+          int k_t = k ;
           out[comp+components*(i_t + r2c_halo * (k_t + local_size_k_halo * j_t))][0]=in[i + local_r2c * (j + local_size_j * (k + local_size_k *l)) ][0];
           out[comp+components*(i_t + r2c_halo * (k_t + local_size_k_halo * j_t))][1]=in[i + local_r2c * (j + local_size_j * (k + local_size_k *l)) ][1];
         }
@@ -1307,14 +2418,15 @@ void PlanFFT<compType>::transpose_back_0_3( fftwf_complex * in, fftwf_complex * 
 template<class compType>
 void PlanFFT<compType>::implement_0(fftwf_complex * in, fftwf_complex * out,int r2c_size,int local_size_j,int local_size_k, int halo,int components, int comp)
 {
-  int i,j,k;
-  i=r2c_size-1;
+  //int i,j,k;
+  int i=r2c_size-1;
   int r2c_halo = r2c_size + 2*halo;
   int local_size_k_halo = local_size_k + 2*halo;
 
-  for(j=0;j<local_size_j;j++)
+  #pragma omp parallel for collapse(2) default(shared)
+  for(int j=0;j<local_size_j;j++)
   {
-    for(k=0;k<local_size_k;k++)
+    for(int k=0;k<local_size_k;k++)
     {
       out[comp+components*(i + r2c_halo * (k + local_size_k_halo *j))][0]=in[j + local_size_j *k][0];
       out[comp+components*(i + r2c_halo * (k + local_size_k_halo *j))][1]=in[j + local_size_j *k][1];
@@ -1327,14 +2439,16 @@ void PlanFFT<compType>::implement_0(fftwf_complex * in, fftwf_complex * out,int 
 template<class compType>
 void PlanFFT<compType>::b_arrange_data_0(fftwf_complex *in, fftwf_complex * out,int dim_i,int dim_j ,int dim_k, int khalo, int components, int comp)
 {
-  int i,j,k;
+  //int i,j,k;
   int jump_i=(dim_i+ 2 *khalo);
   int jump_j=dim_j+ 2 *khalo;
-  for(i=0;i<dim_i;i++)
+
+  #pragma omp parallel for collapse(3) default(shared)
+  for(int i=0;i<dim_i;i++)
   {
-    for(j=0;j<dim_j;j++)
+    for(int j=0;j<dim_j;j++)
     {
-      for(k=0;k<dim_k;k++)
+      for(int k=0;k<dim_k;k++)
       {
         out[j + dim_j * (k + dim_k * i)][0]=in[comp+components*(i + jump_i * (j + jump_j*k))][0];
         out[j + dim_j * (k + dim_k * i)][1]=in[comp+components*(i + jump_i * (j + jump_j*k))][1];
@@ -1347,19 +2461,20 @@ void PlanFFT<compType>::b_arrange_data_0(fftwf_complex *in, fftwf_complex * out,
 template<class compType>
 void PlanFFT<compType>::b_transpose_back_0_1( fftwf_complex * in, fftwf_complex * out,int r2c,int local_r2c,int local_size_j,int local_size_k,int proc_size)
 {
-  int i,j,k,l, i_t, j_t, k_t;
+  //int i,j,k,l, i_t, j_t, k_t;
 
-  for (i=0;i<local_r2c;i++)
+  #pragma omp parallel for collapse(4) default(shared)
+  for (int i=0;i<local_r2c;i++)
   {
-    for(k=0;k<local_size_k;k++)
+    for(int k=0;k<local_size_k;k++)
     {
-      for(j=0;j<local_size_j;j++)
+      for(int j=0;j<local_size_j;j++)
       {
-        for(l=0;l<proc_size;l++)
+        for(int l=0;l<proc_size;l++)
         {
-          i_t = i + l*local_r2c;
-          j_t = j ;
-          k_t = k ;
+          int i_t = i + l*local_r2c;
+          int j_t = j ;
+          int k_t = k ;
           out[i_t + r2c * (k_t + local_size_k * j_t)][0]=in[i + local_r2c * (j + local_size_j * (k + local_size_k *l)) ][0];
           out[i_t + r2c * (k_t + local_size_k * j_t)][1]=in[i + local_r2c * (j + local_size_j * (k + local_size_k *l)) ][1];
         }
@@ -1368,24 +2483,60 @@ void PlanFFT<compType>::b_transpose_back_0_1( fftwf_complex * in, fftwf_complex 
   }
 }
 
+__global__ void b_transpose_back_0_1_kernel(cufftComplex * in, cufftComplex * out, int r2c, int local_r2c, int local_size_j, int local_size_k, int proc_size)
+{
+  int j = blockIdx.x;
+  int k = blockIdx.y;
+
+  //for (int l = 0; l < proc_size; l++)
+  for (int i_t = threadIdx.x; i_t < local_r2c * proc_size; i_t += 128)
+  {
+    int i = i_t % local_r2c;
+    int l = i_t / local_r2c;
+    out[i_t + r2c * (k + local_size_k * j)] = in[i + local_r2c * (j + local_size_j * (k + local_size_k * l))];
+  }
+}
+
+template<class compType>
+void PlanFFT<compType>::b_transpose_back_0_1( cufftComplex * in, cufftComplex * out,int r2c,int local_r2c,int local_size_j,int local_size_k,int proc_size, cudaStream_t &stream)
+{
+  b_transpose_back_0_1_kernel<<<dim3(local_size_j, local_size_k), 128, 0, stream>>>(in, out, r2c, local_r2c, local_size_j, local_size_k, proc_size);
+}
+
 template<class compType>
 void PlanFFT<compType>::b_implement_0(fftwf_complex * in, fftwf_complex * out,int r2c_size,int local_size_j,int local_size_k)
 {
-  int i,j,k;
-  i=r2c_size-1;
+  //int i,j,k;
+  int i=r2c_size-1;
 
-
-  for(j=0;j<local_size_j;j++)
+  #pragma omp parallel for collapse(2) default(shared)
+  for(int j=0;j<local_size_j;j++)
   {
-    for(k=0;k<local_size_k;k++)
+    for(int k=0;k<local_size_k;k++)
     {
       out[i + r2c_size * (k + local_size_k *j)][0]=in[j + local_size_j *k][0];
       out[i + r2c_size * (k + local_size_k *j)][1]=in[j + local_size_j *k][1];
     }
   }
-
 }
 
+__global__ void b_implement_0_kernel(cufftComplex * in, cufftComplex * out, int r2c_size, int local_size_j, int local_size_k)
+{
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (idx < local_size_j * local_size_k)
+  {
+    int j = idx % local_size_j;
+    int k = idx / local_size_j;
+    out[r2c_size - 1 + r2c_size * (k + local_size_k * j)] = in[idx];
+  }
+}
+
+template<class compType>
+void PlanFFT<compType>::b_implement_0(cufftComplex * in, cufftComplex * out, int r2c_size, int local_size_j, int local_size_k, cudaStream_t &stream)
+{
+  b_implement_0_kernel<<<(local_size_j * local_size_k + 127) / 128, 128, 0, stream>>>(in, out, r2c_size, local_size_j, local_size_k);
+}
 
 #endif
 
@@ -1395,12 +2546,14 @@ void PlanFFT<compType>::b_implement_0(fftwf_complex * in, fftwf_complex * out,in
 template<class compType>
 void PlanFFT<compType>::transpose_0_2( fftw_complex * in, fftw_complex * out,int dim_i,int dim_j ,int dim_k)
 {
-  int i,j,k;
-  for(i=0;i<dim_i;i++)
+  //int i,j,k;
+
+  #pragma omp parallel for collapse(3)
+  for(int i=0;i<dim_i;i++)
   {
-    for(j=0;j<dim_j;j++)
+    for(int j=0;j<dim_j;j++)
     {
-      for(k=0;k<dim_k;k++)
+      for(int k=0;k<dim_k;k++)
       {
 
         out[k+dim_k*(j+i*dim_j)][0]=in[i+dim_i*(j+k*dim_j)][0];
@@ -1412,15 +2565,34 @@ void PlanFFT<compType>::transpose_0_2( fftw_complex * in, fftw_complex * out,int
 
 }
 
+__global__ void transpose_0_2_kernel(cufftDoubleComplex * in, cufftDoubleComplex * out, int dim_i, int dim_j, int dim_k)
+{
+  int i = blockIdx.x;
+  int j = blockIdx.y;
+
+  for (int k = threadIdx.x; k < dim_k; k += 128)
+  {
+    out[k + dim_k * (j + i * dim_j)] = in[i + dim_i * (j + k * dim_j)];
+  }
+}
+
+template<class compType>
+void PlanFFT<compType>::transpose_0_2( cufftDoubleComplex * in, cufftDoubleComplex * out, int dim_i, int dim_j, int dim_k, cudaStream_t &stream)
+{
+  transpose_0_2_kernel<<<dim3(dim_i, dim_j), 128, 0, stream>>>(in, out, dim_i, dim_j, dim_k);
+}
+
 template<class compType>
 void PlanFFT<compType>::transpose_0_2_last_proc( fftw_complex * in, fftw_complex * out,int dim_i,int dim_j ,int dim_k)
 {
-  int i,j,k;
-  for(i=0;i<dim_i;i++)
+  //int i,j,k;
+
+  #pragma omp parallel for collapse(3)
+  for(int i=0;i<dim_i;i++)
   {
-    for(j=0;j<dim_j;j++)
+    for(int j=0;j<dim_j;j++)
     {
-      for(k=0;k<dim_k;k++)
+      for(int k=0;k<dim_k;k++)
       {
         out[k+(dim_k+1)*(j+i*dim_j)][0]=in[i+dim_i*(j+k*dim_j)][0];
         out[k+(dim_k+1)*(j+i*dim_j)][1]=in[i+dim_i*(j+k*dim_j)][1];
@@ -1429,17 +2601,36 @@ void PlanFFT<compType>::transpose_0_2_last_proc( fftw_complex * in, fftw_complex
   }
 }
 
+__global__ void transpose_0_2_last_proc_kernel(cufftDoubleComplex * in, cufftDoubleComplex * out, int dim_i, int dim_j, int dim_k)
+{
+  int i = blockIdx.x;
+  int j = blockIdx.y;
+
+  for (int k = threadIdx.x; k < dim_k; k += 128)
+  {
+    out[k + (dim_k + 1) * (j + i * dim_j)] = in[i + dim_i * (j + k * dim_j)];
+  }
+}
+
+template<class compType>
+void PlanFFT<compType>::transpose_0_2_last_proc( cufftDoubleComplex * in, cufftDoubleComplex * out,int dim_i,int dim_j ,int dim_k, cudaStream_t &stream)
+{
+  transpose_0_2_last_proc_kernel<<<dim3(dim_i, dim_j), 128, 0, stream>>>(in, out, dim_i, dim_j, dim_k);
+}
+
 template<class compType>
 void PlanFFT<compType>::implement_local_0_last_proc( fftw_complex * in, fftw_complex * out,int proc_dim_i,int proc_dim_j,int proc_dim_k,int proc_size)
 {
-  int i_in,i_out,j,rank;
-  for(i_in=0;i_in<proc_dim_i;i_in++)
+  //int i_in,i_out,j,rank;
+
+  #pragma omp parallel for collapse(3)
+  for(int i_in=0;i_in<proc_dim_i;i_in++)
   {
-    for(j=0;j<proc_dim_j;j++)
+    for(int j=0;j<proc_dim_j;j++)
     {
-      for(rank=0;rank<proc_size;rank++)
+      for(int rank=0;rank<proc_size;rank++)
       {
-        i_out=i_in+rank*proc_dim_i;
+        int i_out=i_in+rank*proc_dim_i;
         out[proc_dim_k + (proc_dim_k+1)*(j+i_out*proc_dim_j)][0]=in[i_in+proc_dim_i*(j+proc_dim_j*rank)][0];
         out[proc_dim_k + (proc_dim_k+1)*(j+i_out*proc_dim_j)][1]=in[i_in+proc_dim_i*(j+proc_dim_j*rank)][1];
       }
@@ -1447,16 +2638,35 @@ void PlanFFT<compType>::implement_local_0_last_proc( fftw_complex * in, fftw_com
   }
 }
 
+__global__ void implement_local_0_last_proc_kernel(cufftDoubleComplex * in, cufftDoubleComplex * out, int proc_dim_i, int proc_dim_j, int proc_dim_k)
+{
+  int rank = blockIdx.x;
+  int j = blockIdx.y;
+
+  for (int i_in = threadIdx.x; i_in < proc_dim_i; i_in += 128)
+  {
+    int i_out = i_in + rank * proc_dim_i;
+    out[proc_dim_k + (proc_dim_k + 1) * (j + i_out * proc_dim_j)] = in[i_in + proc_dim_i * (j + proc_dim_j * rank)];
+  }
+}
+
+template<class compType>
+void PlanFFT<compType>::implement_local_0_last_proc( cufftDoubleComplex * in, cufftDoubleComplex * out,int proc_dim_i,int proc_dim_j,int proc_dim_k,int proc_size, cudaStream_t &stream)
+{
+  implement_local_0_last_proc_kernel<<<dim3(proc_size, proc_dim_j), 128, 0, stream>>>(in, out, proc_dim_i, proc_dim_j, proc_dim_k);
+}
 
 template<class compType>
 void PlanFFT<compType>::transpose_1_2(fftw_complex * in , fftw_complex * out ,int dim_i,int dim_j ,int dim_k )
 {
-  int i,j,k;
-  for(i=0;i<dim_i;i++)
+  //int i,j,k;
+
+  #pragma omp parallel for collapse(3)
+  for(int i=0;i<dim_i;i++)
   {
-    for(j=0;j<dim_j;j++)
+    for(int j=0;j<dim_j;j++)
     {
-      for(k=0;k<dim_k;k++)
+      for(int k=0;k<dim_k;k++)
       {
         out[i+dim_i*(k+j*dim_k)][0]=in[i+dim_i*(j+k*dim_j)][0];
         out[i+dim_i*(k+j*dim_k)][1]=in[i+dim_i*(j+k*dim_j)][1];
@@ -1465,23 +2675,42 @@ void PlanFFT<compType>::transpose_1_2(fftw_complex * in , fftw_complex * out ,in
   }
 }
 
+__global__ void transpose_1_2_kernel(cufftDoubleComplex * in, cufftDoubleComplex * out, int dim_i, int dim_j, int dim_k)
+{
+  int i = blockIdx.x;
+  int j = blockIdx.y;
+
+  for (int k = threadIdx.x; k < dim_k; k += 128)
+  {
+    out[i + dim_i * (k + j * dim_k)] = in[i + dim_i * (j + k * dim_j)];
+  }
+}
+
+template<class compType>
+void PlanFFT<compType>::transpose_1_2(cufftDoubleComplex * in , cufftDoubleComplex * out  ,int dim_i,int dim_j ,int dim_k, cudaStream_t &stream)
+{
+  transpose_1_2_kernel<<<dim3(dim_i, dim_j), 128, 0, stream>>>(in, out, dim_i, dim_j, dim_k);
+}
+
 template<class compType>
 void PlanFFT<compType>::transpose_back_0_3( fftw_complex * in, fftw_complex * out,int r2c,int local_r2c,int local_size_j,int local_size_k,int proc_size,int halo,int components, int comp)
 {
-  int i,j,k,l, i_t, j_t, k_t;
+  //int i,j,k,l, i_t, j_t, k_t;
   int r2c_halo = r2c + 2*halo;
   int local_size_k_halo = local_size_k + 2*halo;
-  for (i=0;i<local_r2c;i++)
+
+  #pragma omp parallel for collapse(4) default(shared)
+  for (int i=0;i<local_r2c;i++)
   {
-    for(k=0;k<local_size_k;k++)
+    for(int k=0;k<local_size_k;k++)
     {
-      for(j=0;j<local_size_j;j++)
+      for(int j=0;j<local_size_j;j++)
       {
-        for(l=0;l<proc_size;l++)
+        for(int l=0;l<proc_size;l++)
         {
-          i_t = i + l*local_r2c;
-          j_t = j ;
-          k_t = k ;
+          int i_t = i + l*local_r2c;
+          int j_t = j ;
+          int k_t = k ;
           out[comp+components*(i_t + r2c_halo * (k_t + local_size_k_halo * j_t))][0]=in[i + local_r2c * (j + local_size_j * (k + local_size_k *l)) ][0];
           out[comp+components*(i_t + r2c_halo * (k_t + local_size_k_halo * j_t))][1]=in[i + local_r2c * (j + local_size_j * (k + local_size_k *l)) ][1];
         }
@@ -1493,14 +2722,15 @@ void PlanFFT<compType>::transpose_back_0_3( fftw_complex * in, fftw_complex * ou
 template<class compType>
 void PlanFFT<compType>::implement_0(fftw_complex * in, fftw_complex * out,int r2c_size,int local_size_j,int local_size_k, int halo,int components, int comp)
 {
-  int i,j,k;
-  i=r2c_size-1;
+  // int i,j,k;
+  int i=r2c_size-1;
   int r2c_halo = r2c_size + 2*halo;
   int local_size_k_halo = local_size_k + 2*halo;
 
-  for(j=0;j<local_size_j;j++)
+  #pragma omp parallel for collapse(2) default(shared)
+  for(int j=0;j<local_size_j;j++)
   {
-    for(k=0;k<local_size_k;k++)
+    for(int k=0;k<local_size_k;k++)
     {
       out[comp+components*(i + r2c_halo * (k + local_size_k_halo *j))][0]=in[j + local_size_j *k][0];
       out[comp+components*(i + r2c_halo * (k + local_size_k_halo *j))][1]=in[j + local_size_j *k][1];
@@ -1513,14 +2743,16 @@ void PlanFFT<compType>::implement_0(fftw_complex * in, fftw_complex * out,int r2
 template<class compType>
 void PlanFFT<compType>::b_arrange_data_0(fftw_complex *in, fftw_complex * out,int dim_i,int dim_j ,int dim_k, int khalo, int components, int comp)
 {
-  int i,j,k;
+  //int i,j,k;
   int jump_i=(dim_i+ 2 *khalo);
   int jump_j=dim_j+ 2 *khalo;
-  for(i=0;i<dim_i;i++)
+
+  #pragma omp parallel for collapse(3) default(shared)
+  for(int i=0;i<dim_i;i++)
   {
-    for(j=0;j<dim_j;j++)
+    for(int j=0;j<dim_j;j++)
     {
-      for(k=0;k<dim_k;k++)
+      for(int k=0;k<dim_k;k++)
       {
         out[j + dim_j * (k + dim_k * i)][0]=in[comp+components*(i + jump_i * (j + jump_j*k))][0];
         out[j + dim_j * (k + dim_k * i)][1]=in[comp+components*(i + jump_i * (j + jump_j*k))][1];
@@ -1533,19 +2765,20 @@ void PlanFFT<compType>::b_arrange_data_0(fftw_complex *in, fftw_complex * out,in
 template<class compType>
 void PlanFFT<compType>::b_transpose_back_0_1( fftw_complex * in, fftw_complex * out,int r2c,int local_r2c,int local_size_j,int local_size_k,int proc_size)
 {
-  int i,j,k,l, i_t, j_t, k_t;
+  //int i,j,k,l, i_t, j_t, k_t;
 
-  for (i=0;i<local_r2c;i++)
+  #pragma omp parallel for collapse(4)
+  for (int i=0;i<local_r2c;i++)
   {
-    for(k=0;k<local_size_k;k++)
+    for(int k=0;k<local_size_k;k++)
     {
-      for(j=0;j<local_size_j;j++)
+      for(int j=0;j<local_size_j;j++)
       {
-        for(l=0;l<proc_size;l++)
+        for(int l=0;l<proc_size;l++)
         {
-          i_t = i + l*local_r2c;
-          j_t = j ;
-          k_t = k ;
+          int i_t = i + l*local_r2c;
+          int j_t = j ;
+          int k_t = k ;
           out[i_t + r2c * (k_t + local_size_k * j_t)][0]=in[i + local_r2c * (j + local_size_j * (k + local_size_k *l)) ][0];
           out[i_t + r2c * (k_t + local_size_k * j_t)][1]=in[i + local_r2c * (j + local_size_j * (k + local_size_k *l)) ][1];
         }
@@ -1554,16 +2787,36 @@ void PlanFFT<compType>::b_transpose_back_0_1( fftw_complex * in, fftw_complex * 
   }
 }
 
+__global__ void b_transpose_back_0_1_kernel(cufftDoubleComplex * in, cufftDoubleComplex * out, int r2c, int local_r2c, int local_size_j, int local_size_k, int proc_size)
+{
+  int j = blockIdx.x;
+  int k = blockIdx.y;
+
+  //for (int l = 0; l < proc_size; l++)
+  for (int i_t = threadIdx.x; i_t < local_r2c * proc_size; i_t += 128)
+  {
+    int i = i_t % local_r2c;
+    int l = i_t / local_r2c;
+    out[i_t + r2c * (k + local_size_k * j)] = in[i + local_r2c * (j + local_size_j * (k + local_size_k * l))];
+  }
+}
+
+template<class compType>
+void PlanFFT<compType>::b_transpose_back_0_1( cufftDoubleComplex * in, cufftDoubleComplex * out,int r2c,int local_r2c,int local_size_j,int local_size_k,int proc_size, cudaStream_t &stream)
+{
+  b_transpose_back_0_1_kernel<<<dim3(local_size_j, local_size_k), 128, 0, stream>>>(in, out, r2c, local_r2c, local_size_j, local_size_k, proc_size);
+}
+
 template<class compType>
 void PlanFFT<compType>::b_implement_0(fftw_complex * in, fftw_complex * out,int r2c_size,int local_size_j,int local_size_k)
 {
-  int i,j,k;
-  i=r2c_size-1;
+  //int i,j,k;
+  int i=r2c_size-1;
 
-
-  for(j=0;j<local_size_j;j++)
+  #pragma omp parallel for collapse(2) default(shared)
+  for(int j=0;j<local_size_j;j++)
   {
-    for(k=0;k<local_size_k;k++)
+    for(int k=0;k<local_size_k;k++)
     {
       out[i + r2c_size * (k + local_size_k *j)][0]=in[j + local_size_j *k][0];
       out[i + r2c_size * (k + local_size_k *j)][1]=in[j + local_size_j *k][1];
@@ -1571,6 +2824,25 @@ void PlanFFT<compType>::b_implement_0(fftw_complex * in, fftw_complex * out,int 
   }
 
 }
+
+__global__ void b_implement_0_kernel(cufftDoubleComplex * in, cufftDoubleComplex * out, int r2c_size, int local_size_j, int local_size_k)
+{
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (idx < local_size_j * local_size_k)
+  {
+    int j = idx % local_size_j;
+    int k = idx / local_size_j;
+    out[r2c_size - 1 + r2c_size * (k + local_size_k * j)] = in[idx];
+  }
+}
+
+template<class compType>
+void PlanFFT<compType>::b_implement_0(cufftDoubleComplex * in, cufftDoubleComplex * out, int r2c_size, int local_size_j, int local_size_k, cudaStream_t &stream)
+{
+  b_implement_0_kernel<<<(local_size_j * local_size_k + 127) / 128, 128, 0, stream>>>(in, out, r2c_size, local_size_j, local_size_k);
+}
+
 #endif
 
 
