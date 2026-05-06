@@ -233,14 +233,15 @@ public:
                        int * reduce_type=NULL,
                        int noutput=0);*/
 
-    void moveParticles( void (*move_funct)(double,double,part*,double *,part_info,Field<Real> **,Site *,int,double*,double*,int),
+    void moveParticles( void (*move_funct)(double,double,part*,double *,part_info,Field<Real> **,Site *,int,double*,double*,int,void **),
                        double dtau,
                        Field<Real> ** fields=NULL,
                        int nfields=0,
                        double * params=NULL,
                        double * output=NULL,
                        int * reduce_type=NULL,
-                       int noutput=0);
+                       int noutput=0,
+                       void ** vparams = NULL);
 
 #ifdef HDF5
     /*!
@@ -1789,14 +1790,15 @@ void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(
 }*/
 
 template <typename part, typename part_info, typename part_dataType>
-void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(double,double,part*,double *,part_info,Field<Real> **,Site *,int,double*,double*,int),
+void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(double,double,part*,double *,part_info,Field<Real> **,Site *,int,double*,double*,int,void **),
                                                             double dtau,
                                                             Field<Real> ** fields,
                                                             int nfields,
                                                             double * params,
                                                             double * output,
                                                             int * reduce_type,
-                                                            int noutput)
+                                                            int noutput,
+                                                            void ** vparams)
 {
 
 
@@ -1890,7 +1892,8 @@ void Particles<part,part_info,part_dataType>::moveParticles( void (*move_funct)(
                            nfields,
                            params,
                            output_temp,
-                           noutput);
+                           noutput,
+                           vparams);
 
 
                 if(noutput>0)for(int i=0;i<noutput;i++)

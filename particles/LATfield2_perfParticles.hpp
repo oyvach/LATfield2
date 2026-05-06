@@ -158,7 +158,7 @@ template <typename T>
 __global__ void reorder_data(unsigned long long int * indices_out, T * data_in, T * data_out, size_t stride, size_t ndata);
 
 template <typename part, typename part_info, typename UpdateFunct>
-__global__ void update_particles(perfParticles<part, part_info> * pcl, UpdateFunct update_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int * reduce_type, int noutput, Real * v2, bool copyout = true);
+__global__ void update_particles(perfParticles<part, part_info> * pcl, UpdateFunct update_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int * reduce_type, int noutput, Real * v2, bool copyout = true, void ** vparams = NULL);
 
 template <typename part, typename part_info>
 __global__ void project_particles(perfParticles<part, part_info> * pcl, Real * target, int projection_order, long start_idx, long jump0, long jump1, long jump2, int stencil_k);
@@ -394,7 +394,7 @@ class perfParticles
         friend __global__ void compute_rows(perfParticles<part2, part_info2> * pcl, uint32_t * row, unsigned long long int starting_idx);
 
         template <typename part2, typename part_info2, typename UpdateFunct>
-        friend __global__ void update_particles(perfParticles<part2, part_info2> * pcl, UpdateFunct update_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int * reduce_type, int noutput, Real * v2, bool copyout);
+        friend __global__ void update_particles(perfParticles<part2, part_info2> * pcl, UpdateFunct update_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int * reduce_type, int noutput, Real * v2, bool copyout, void ** vparams);
 
         template <typename part2, typename part_info2>
         friend __global__ void project_particles(perfParticles<part2, part_info2> * pcl, Real * target, int projection_order, long start_idx, long jump0, long jump1, long jump2, int stencil_k);
@@ -767,6 +767,21 @@ __global__ void reorder_data(unsigned long long int * indices_out, T * data_in, 
 template <typename part, typename part_info>
 void perfParticles<part, part_info>::prepareComm(unsigned long long int * send_begin, uint32_t ** d_keys, void ** d_temp, cudaStream_t & stream)
 {
+    if (num_particles_ == 0 || num_row_buffers_ == 0)
+    {
+        if (send_begin != nullptr)
+        {
+            auto success = cudaMemsetAsync(send_begin, 0, 10 * sizeof(unsigned long long int), stream);
+            if (success != cudaSuccess)
+            {
+                std::cerr << "CUDA memset failed: " << cudaGetErrorString(success) << std::endl;
+                throw std::runtime_error("Error in CUDA memset for send_begin in prepareComm");
+            }
+        }
+        rows_sorted_ = false;
+        return;
+    }
+
     uint32_t * d_keys_in = nullptr;
     unsigned long long int * d_indices_in = nullptr;
     unsigned long long int * d_indices_out = nullptr;
@@ -851,6 +866,11 @@ void perfParticles<part, part_info>::prepareComm(unsigned long long int * send_b
 template <typename part, typename part_info>
 void perfParticles<part, part_info>::computeSortIndices(uint32_t * d_keys, unsigned long long int * d_indices, void ** d_temp, cudaStream_t & stream)
 {
+    if (num_particles_ == 0 || num_row_buffers_ == 0)
+    {
+        return;
+    }
+
     uint32_t * d_keys_out;
     unsigned long long int * d_indices_out;
     unsigned long long int * row_offsets;
@@ -1425,15 +1445,15 @@ __host__ __device__ auto perfParticles<part, part_info>::updateParticle(int row,
     pcl.vel[2] = row_buffers_[row].q[3*idx+2];
     pcl.ID = row_buffers_[row].other[idx];
 
-    using return_type = decltype(update_funct(dtau, dx, &pcl, frac, part_global_info_, fields, sites, nfields, params, output, noutput));
+    using return_type = decltype(update_funct(dtau, dx, &pcl, frac, part_global_info_, fields, sites, nfields, params, output, noutput, vparams));
 
     if constexpr (std::is_same_v<return_type, void>)
     {
-        update_funct(dtau, dx, &pcl, frac, part_global_info_, fields, sites, nfields, params, output, noutput);
+        update_funct(dtau, dx, &pcl, frac, part_global_info_, fields, sites, nfields, params, output, noutput, vparams);
     }
     else
     {
-        v2 = update_funct(dtau, dx, &pcl, frac, part_global_info_, fields, sites, nfields, params, output, noutput);
+        v2 = update_funct(dtau, dx, &pcl, frac, part_global_info_, fields, sites, nfields, params, output, noutput, vparams);
     }
 
     if (copyout)
@@ -1473,7 +1493,7 @@ Real perfParticles<part, part_info>::updateVel(UpdateFunct updateVel_funct, doub
 {
     Real maxvel = 0.;
 
-    updateParticles(updateVel_funct, dtau, fields, nfields, params, output, reduce_type, noutput, &maxvel, vparams);
+    updateParticles(updateVel_funct, dtau, fields, nfields, params, output, reduce_type, noutput, &maxvel, true, false, vparams);
 
     return maxvel;
 }
@@ -1517,11 +1537,38 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
 
     nvtxRangePushA("moveParticles: updateParticles");
 
-    updateParticles(move_funct, dtau, fields, nfields, params, output, reduce_type, noutput, vparams);
+    updateParticles(move_funct, dtau, fields, nfields, params, output, reduce_type, noutput, nullptr, true, false, vparams);
 
     nvtxRangePop();
 
+#ifdef DEBUGCUDA
+    {
+        cudaError_t peekErr = cudaPeekAtLastError();
+        std::cerr << "CUDA_MOVE rank=" << parallel.rank()
+                  << " where=after_updateParticles"
+                  << " num_particles=" << num_particles_
+                  << " num_row_buffers=" << num_row_buffers_
+                  << " row_buffers_ptr=" << (void *)row_buffers_
+                  << " p_ptr=" << (void *)p
+                  << " peekErr=" << cudaGetErrorString(peekErr)
+                  << std::endl;
+    }
+#endif
+
     thrust::for_each(thrust::device, row_buffers_, row_buffers_ + num_row_buffers_, [] __device__ (row_buffer<Real, Real, long> & rb) { rb.sorted = false;});
+
+#ifdef DEBUGCUDA
+    {
+        cudaError_t peekErr = cudaPeekAtLastError();
+        std::cerr << "CUDA_MOVE rank=" << parallel.rank()
+                  << " where=after_row_buffers_for_each"
+                  << " num_particles=" << num_particles_
+                  << " num_row_buffers=" << num_row_buffers_
+                  << " row_buffers_ptr=" << (void *)row_buffers_
+                  << " peekErr=" << cudaGetErrorString(peekErr)
+                  << std::endl;
+    }
+#endif
 
     rows_sorted_ = false;
 
@@ -1539,7 +1586,8 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
 
     prepareComm(d_send_begin, &d_keys, &d_temp, pcl_stream);
 
-    cudaFreeAsync(d_temp, pcl_stream); // free temporary storage for now (FIXME: maybe reuse later)
+    if (d_temp != nullptr)
+        cudaFreeAsync(d_temp, pcl_stream); // free temporary storage for now (FIXME: maybe reuse later)
     cudaMemcpyAsync(send_begin, d_send_begin, 10 * sizeof(unsigned long long int), cudaMemcpyDefault, pcl_stream);
     cudaFreeAsync(d_send_begin, pcl_stream);
 
@@ -2033,6 +2081,18 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         }
     });
 
+#ifdef DEBUGCUDA
+    {
+        cudaError_t peekErr = cudaPeekAtLastError();
+        std::cerr << "CUDA_MOVE rank=" << parallel.rank()
+                  << " where=after_periodic_pos_for_each"
+                  << " num_particles=" << num_particles_
+                  << " p_ptr=" << (void *)p
+                  << " peekErr=" << cudaGetErrorString(peekErr)
+                  << std::endl;
+    }
+#endif
+
     nvtxRangePop();
 
 #ifdef DEBUG_RADIX_SORT
@@ -2070,21 +2130,45 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
 
     nvtxRangePushA("moveParticles: sort particles");
 
-    unsigned long long * d_indices_in;
-    success = cudaMallocAsync((void **) &d_indices_in, num_particles_ * sizeof(unsigned long long) * 2L, pcl_stream);
-    if (success != cudaSuccess)
+    // Previous unconditional path kept for debugging/reference:
+    // unsigned long long * d_indices_in;
+    // success = cudaMallocAsync((void **) &d_indices_in, num_particles_ * sizeof(unsigned long long) * 2L, pcl_stream);
+    // if (success != cudaSuccess)
+    // {
+    //     throw std::runtime_error("CUDA malloc failed in moveParticles");
+    // }
+    //
+    // computeSortIndices(d_keys, d_indices_in, &d_temp, pcl_stream);
+    //
+    // nvtxRangePop();
+    //
+    // reorderParticles(d_indices_in, d_temp, pcl_stream);
+    //
+    // cudaFreeAsync(d_temp, pcl_stream);
+    // cudaFreeAsync(d_indices_in, pcl_stream);
+
+    if (num_particles_ > 0)
     {
-        throw std::runtime_error("CUDA malloc failed in moveParticles");
+        unsigned long long * d_indices_in;
+        success = cudaMallocAsync((void **) &d_indices_in, num_particles_ * sizeof(unsigned long long) * 2L, pcl_stream);
+        if (success != cudaSuccess)
+        {
+            throw std::runtime_error("CUDA malloc failed in moveParticles");
+        }
+
+        computeSortIndices(d_keys, d_indices_in, &d_temp, pcl_stream);
+
+        nvtxRangePop();
+
+        reorderParticles(d_indices_in, d_temp, pcl_stream);
+
+        cudaFreeAsync(d_temp, pcl_stream);
+        cudaFreeAsync(d_indices_in, pcl_stream);
     }
-
-    computeSortIndices(d_keys, d_indices_in, &d_temp, pcl_stream);
-
-    nvtxRangePop();
-
-    reorderParticles(d_indices_in, d_temp, pcl_stream);
-
-    cudaFreeAsync(d_temp, pcl_stream);
-    cudaFreeAsync(d_indices_in, pcl_stream);
+    else
+    {
+        nvtxRangePop();
+    }
 
     update_pointers<<<(num_row_buffers_+137)/128, 128, 0, pcl_stream>>>(this, nullptr);
 
