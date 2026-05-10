@@ -52,7 +52,6 @@ __global__ void lattice_for_each(ForEachFunct funct, int numpts, Field<Real> ** 
                             + coord1*fields[i]->lattice().jump(1)
                             + coord2*fields[i]->lattice().jump(2));
         }
-
         funct(fields, sites, nfields, params, output_site, vparams);
 
         if constexpr (noutput > 0)

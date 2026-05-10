@@ -272,6 +272,12 @@ class Field
          Update the halo sites (ghost cells) of the field. This method us the operator = to assign values, thefor be sure that this operator is defined or correctly overloaded when using field of class or struct.
          */
 		void updateHalo(bool debug = false);
+		
+		void updateHaloCustom( FieldType* buffer_send, FieldType* buffer_rec, FieldType* buffer_send_dev, FieldType* buffer_rec_dev,
+										int &buffer_size0, int &buffer_size1, cudaPointerAttributes &attributes);
+
+		void setUpHaloBuffersCustom( FieldType*& buffer_send, FieldType*& buffer_rec, FieldType*& buffer_send_dev, FieldType*& buffer_rec_dev,
+										int &buffer_size0, int &buffer_size1, cudaPointerAttributes &attributes, bool &buffers_mapped);
 
 		//FILE I/O FUNCTIONS
 
@@ -419,6 +425,8 @@ class Field
 	private:
 		//PRIVATE FUNCTIONS
 		void updateHaloComms();
+		void updateHaloCommsCustom(FieldType* buffer_send, FieldType* buffer_rec, FieldType* buffer_send_dev, FieldType* buffer_rec_dev,
+										int buffer_size0, int buffer_size1, cudaPointerAttributes attributes);
 
 #ifdef HDF5
         void get_h5type();
@@ -1008,6 +1016,78 @@ __global__ void copy_halo_values (FieldType * data, int size_1, int jump_1, int 
 }
 
 template <class FieldType>
+void Field<FieldType>::updateHaloCustom(FieldType* buffer_send, FieldType* buffer_rec, FieldType* buffer_send_dev, FieldType* buffer_rec_dev,
+										int &buffer_size0, int &buffer_size1, cudaPointerAttributes &attributes)
+{
+	bool debug = false;
+	if (debug || lattice_->dim() != 3)
+	{
+		nvtxRangePushA("copy local halo values (debug)");
+		Site site(*lattice_);
+		int copyfrom;
+
+		int  dim=lattice_->dim();
+		int* jump=new int[dim];
+		int* size=new int[dim];
+
+		for(int i=0; i<dim; i++)
+		{
+			jump[i]=lattice_->jump(i);
+			size[i]=lattice_->sizeLocal(i);
+		}
+
+		for(site.haloFirst(); site.haloTest(); site.haloNext())
+		{
+			//Work out where to copy from
+			copyfrom=site.index();
+			for(int i=0; i<dim; i++)
+			{
+				if( site.coordLocal(i)<0 )
+				{
+					copyfrom += jump[i] * size[i];
+				}
+				else if( site.coordLocal(i) >= size[i] )
+				{
+					copyfrom -= jump[i] * size[i];
+				}
+			}
+			//Copy data
+			for(int i=0; i<components_; i++)
+			{
+				data_[site.index()*components_+i] = data_[copyfrom*components_+i];
+				//memcpy(data_[site.index()*components_+i],data_[copyfrom*components_+i],sizeof_fieldType_);
+
+			}
+		}
+
+		delete[] jump;
+		delete[] size;
+		nvtxRangePop();
+	}
+	else
+	{
+		nvtxRangePushA("copy local halo values (device)");
+		copy_halo_values<<<lattice_->sizeLocal(2), 128>>>(data_, lattice_->sizeLocal(1), lattice_->jump(1)*components_, lattice_->jump(2)*components_, lattice_->halo(), components_);
+
+		if (parallel.size() <= 1)
+		{
+			auto success = cudaDeviceSynchronize(); // improvement
+
+			if (success != cudaSuccess)
+			{
+				cout << "LATfield2::Field::updateHalo  :process " << parallel.rank() << " cannot synchronize device." << endl;
+							cudaError_t last_err = cudaGetLastError();
+							cout << "LATfield2::Field::updateHalo  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+				throw std::runtime_error("CUDA device synchronization failed");
+			}
+		}
+		nvtxRangePop();
+	}
+
+	if( parallel.size()>1 ) { updateHaloCommsCustom( buffer_send, buffer_rec, buffer_send_dev, buffer_rec_dev, buffer_size0, buffer_size1, attributes); }
+}
+
+template <class FieldType>
 void Field<FieldType>::updateHalo(bool debug)
 {
 	if (debug || lattice_->dim() != 3)
@@ -1081,6 +1161,1146 @@ __global__ void copy_halo_values (FieldType * src, FieldType * dest, int stride_
 	{
 		dest[i + blockIdx.x * stride_dest] = src[i + blockIdx.x * stride_src];
 	}
+}
+
+inline cudaError_t halo_comm_sync_default_stream()
+{
+#ifdef HALO_COMMS_EVENT_SYNC
+	// Event-based stream sync path, enabled with -DHALO_COMMS_EVENT_SYNC.
+	static thread_local cudaEvent_t halo_sync_event = nullptr;
+	if (halo_sync_event == nullptr)
+	{
+		cudaError_t success = cudaEventCreateWithFlags(&halo_sync_event, cudaEventDisableTiming);
+		if (success != cudaSuccess)
+		{
+			return success;
+		}
+	}
+
+	cudaError_t success = cudaEventRecord(halo_sync_event, 0);
+	if (success != cudaSuccess)
+	{
+		return success;
+	}
+
+	nvtxRangePushA("halo stream sync");
+	success = cudaEventSynchronize(halo_sync_event);
+	nvtxRangePop();
+	return success;
+#else
+	nvtxRangePushA("halo stream sync");
+	cudaError_t success = cudaStreamSynchronize(0);
+	nvtxRangePop();
+	return success;
+#endif
+}
+
+template <class FieldType>
+inline void halo_comm_exchange_dim0(FieldType* send_buf, FieldType* recv_buf, int len, int peer)
+{
+#ifdef HALO_COMMS_EVENT_SYNC
+	MPI_Request reqs[2];
+	MPI_Irecv(recv_buf, len * sizeof(FieldType), MPI_BYTE, peer, 0, parallel.dim0_comm()[parallel.grid_rank()[1]], &reqs[0]);
+	MPI_Isend(send_buf, len * sizeof(FieldType), MPI_BYTE, peer, 0, parallel.dim0_comm()[parallel.grid_rank()[1]], &reqs[1]);
+	MPI_Waitall(2, reqs, MPI_STATUSES_IGNORE);
+#else
+	MPI_Sendrecv(send_buf, len * sizeof(FieldType), MPI_BYTE, peer, 0,
+		recv_buf, len * sizeof(FieldType), MPI_BYTE, peer, 0,
+		parallel.dim0_comm()[parallel.grid_rank()[1]], MPI_STATUS_IGNORE);
+#endif
+}
+
+template <class FieldType>
+inline void halo_comm_exchange_dim1(FieldType* send_buf, FieldType* recv_buf, int len, int peer)
+{
+#ifdef HALO_COMMS_EVENT_SYNC
+	MPI_Request reqs[2];
+	MPI_Irecv(recv_buf, len * sizeof(FieldType), MPI_BYTE, peer, 0, parallel.dim1_comm()[parallel.grid_rank()[0]], &reqs[0]);
+	MPI_Isend(send_buf, len * sizeof(FieldType), MPI_BYTE, peer, 0, parallel.dim1_comm()[parallel.grid_rank()[0]], &reqs[1]);
+	MPI_Waitall(2, reqs, MPI_STATUSES_IGNORE);
+#else
+	MPI_Sendrecv(send_buf, len * sizeof(FieldType), MPI_BYTE, peer, 0,
+		recv_buf, len * sizeof(FieldType), MPI_BYTE, peer, 0,
+		parallel.dim1_comm()[parallel.grid_rank()[0]], MPI_STATUS_IGNORE);
+#endif
+}
+
+template <class FieldType>
+inline void halo_comm_exchange_start_dim0(FieldType* send_buf, FieldType* recv_buf, int len, int peer, MPI_Request reqs[2])
+{
+#ifdef HALO_COMMS_EVENT_SYNC
+	MPI_Irecv(recv_buf, len * sizeof(FieldType), MPI_BYTE, peer, 0, parallel.dim0_comm()[parallel.grid_rank()[1]], &reqs[0]);
+	MPI_Isend(send_buf, len * sizeof(FieldType), MPI_BYTE, peer, 0, parallel.dim0_comm()[parallel.grid_rank()[1]], &reqs[1]);
+#else
+	MPI_Sendrecv(send_buf, len * sizeof(FieldType), MPI_BYTE, peer, 0,
+		recv_buf, len * sizeof(FieldType), MPI_BYTE, peer, 0,
+		parallel.dim0_comm()[parallel.grid_rank()[1]], MPI_STATUS_IGNORE);
+	(void)reqs;
+#endif
+}
+
+template <class FieldType>
+inline void halo_comm_exchange_start_dim1(FieldType* send_buf, FieldType* recv_buf, int len, int peer, MPI_Request reqs[2])
+{
+#ifdef HALO_COMMS_EVENT_SYNC
+	MPI_Irecv(recv_buf, len * sizeof(FieldType), MPI_BYTE, peer, 0, parallel.dim1_comm()[parallel.grid_rank()[0]], &reqs[0]);
+	MPI_Isend(send_buf, len * sizeof(FieldType), MPI_BYTE, peer, 0, parallel.dim1_comm()[parallel.grid_rank()[0]], &reqs[1]);
+#else
+	MPI_Sendrecv(send_buf, len * sizeof(FieldType), MPI_BYTE, peer, 0,
+		recv_buf, len * sizeof(FieldType), MPI_BYTE, peer, 0,
+		parallel.dim1_comm()[parallel.grid_rank()[0]], MPI_STATUS_IGNORE);
+	(void)reqs;
+#endif
+}
+
+inline void halo_comm_exchange_wait(MPI_Request reqs[2])
+{
+#ifdef HALO_COMMS_EVENT_SYNC
+	MPI_Waitall(2, reqs, MPI_STATUSES_IGNORE);
+#else
+	(void)reqs;
+#endif
+}
+
+template  <class FieldType>
+void Field<FieldType>::setUpHaloBuffersCustom(FieldType*& buffer_send, FieldType*& buffer_rec, FieldType*& buffer_send_dev, FieldType*& buffer_rec_dev,
+										int &buffer_size0, int &buffer_size1, cudaPointerAttributes &attributes, bool &buffers_mapped)
+{
+	int temp;
+	auto success = cudaPointerGetAttributes(&attributes, data_);
+
+	if (success != cudaSuccess)
+	{
+		cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot get pointer attributes." << endl;
+		throw std::runtime_error("CUDA pointer attributes failed");
+	}
+
+	//Size of buffer : max size between 2 scatered dimension;
+	buffer_size0 = lattice_->halo() * components_*lattice_->jump(lattice_->dim()-1);
+	buffer_size1 = lattice_->halo() * components_*lattice_->jump(lattice_->dim()-2) *lattice_->sizeLocal(lattice_->dim()-1);
+
+	if(buffer_size0>buffer_size1)temp=buffer_size0;
+	else temp=buffer_size1;
+
+	int alloc_count = temp;
+#ifdef HALO_COMMS_EVENT_SYNC
+	alloc_count = 2 * temp;
+#endif
+
+    buffers_mapped = false;
+
+	if (attributes.type == cudaMemoryTypeHost)
+	{
+		buffer_send = new FieldType[ alloc_count ];
+		buffer_rec = new FieldType[ alloc_count ];
+	}
+	else
+	{
+		success = cudaHostAlloc((void**)&buffer_send, alloc_count * sizeof(FieldType), cudaHostAllocMapped);
+		if (success != cudaSuccess)
+		{
+			cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot allocate pinned send buffer." << endl;
+			throw std::runtime_error("CUDA host allocation failed");
+		}
+		success = cudaHostAlloc((void**)&buffer_rec, alloc_count * sizeof(FieldType), cudaHostAllocMapped);
+		if (success != cudaSuccess)
+		{
+			cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot allocate pinned receive buffer." << endl;
+			cudaFreeHost(buffer_send);
+			throw std::runtime_error("CUDA host allocation failed");
+		}
+		success = cudaHostGetDevicePointer((void**)&buffer_send_dev, buffer_send, 0);
+		if (success != cudaSuccess)
+		{
+			cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot get device pointer for send buffer." << endl;
+			cudaFreeHost(buffer_send);
+			cudaFreeHost(buffer_rec);
+			throw std::runtime_error("CUDA host pointer mapping failed");
+		}
+		success = cudaHostGetDevicePointer((void**)&buffer_rec_dev, buffer_rec, 0);
+		if (success != cudaSuccess)
+		{
+			cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot get device pointer for receive buffer." << endl;
+			cudaFreeHost(buffer_send);
+			cudaFreeHost(buffer_rec);
+			throw std::runtime_error("CUDA host pointer mapping failed");
+		}
+		buffers_mapped = true;
+	}
+}
+
+template <class FieldType>
+void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* buffer_rec, FieldType* buffer_send_dev, FieldType* buffer_rec_dev,
+										int buffer_size0, int buffer_size1, cudaPointerAttributes attributes)
+{
+
+	// int buffer_size0, buffer_size1,temp;
+	// cudaPointerAttributes attributes;
+
+	// auto success = cudaPointerGetAttributes(&attributes, data_);
+
+	// if (success != cudaSuccess)
+	// {
+	// 	cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot get pointer attributes." << endl;
+	// 	throw std::runtime_error("CUDA pointer attributes failed");
+	// }
+
+	// //Size of buffer : max size between 2 scatered dimension;
+	// buffer_size0 = lattice_->halo() * components_*lattice_->jump(lattice_->dim()-1);
+	// buffer_size1 = lattice_->halo() * components_*lattice_->jump(lattice_->dim()-2) *lattice_->sizeLocal(lattice_->dim()-1);
+
+	// if(buffer_size0>buffer_size1)temp=buffer_size0;
+	// else temp=buffer_size1;
+
+	// FieldType* buffer_send = nullptr;
+	// FieldType* buffer_rec = nullptr;
+	// FieldType* buffer_send_dev = nullptr;
+	// FieldType* buffer_rec_dev = nullptr;
+	// bool buffers_mapped = false;
+
+	// if (attributes.type == cudaMemoryTypeHost)
+	// {
+	// 	buffer_send = new FieldType[ temp ];
+	// 	buffer_rec = new FieldType[ temp ];
+	// }
+	// else
+	// {
+	// 	success = cudaHostAlloc((void**)&buffer_send, temp * sizeof(FieldType), cudaHostAllocMapped);
+	// 	if (success != cudaSuccess)
+	// 	{
+	// 		cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot allocate pinned send buffer." << endl;
+	// 		throw std::runtime_error("CUDA host allocation failed");
+	// 	}
+	// 	success = cudaHostAlloc((void**)&buffer_rec, temp * sizeof(FieldType), cudaHostAllocMapped);
+	// 	if (success != cudaSuccess)
+	// 	{
+	// 		cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot allocate pinned receive buffer." << endl;
+	// 		cudaFreeHost(buffer_send);
+	// 		throw std::runtime_error("CUDA host allocation failed");
+	// 	}
+	// 	success = cudaHostGetDevicePointer((void**)&buffer_send_dev, buffer_send, 0);
+	// 	if (success != cudaSuccess)
+	// 	{
+	// 		cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot get device pointer for send buffer." << endl;
+	// 		cudaFreeHost(buffer_send);
+	// 		cudaFreeHost(buffer_rec);
+	// 		throw std::runtime_error("CUDA host pointer mapping failed");
+	// 	}
+	// 	success = cudaHostGetDevicePointer((void**)&buffer_rec_dev, buffer_rec, 0);
+	// 	if (success != cudaSuccess)
+	// 	{
+	// 		cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot get device pointer for receive buffer." << endl;
+	// 		cudaFreeHost(buffer_send);
+	// 		cudaFreeHost(buffer_rec);
+	// 		throw std::runtime_error("CUDA host pointer mapping failed");
+	// 	}
+	// 	buffers_mapped = true;
+	// }
+
+	cudaError_t success;
+	int temp = (buffer_size0 > buffer_size1) ? buffer_size0 : buffer_size1;
+
+#ifdef HALO_COMMS_EVENT_SYNC
+	FieldType* buffer_send_pp = buffer_send + temp;
+	FieldType* buffer_rec_pp = buffer_rec + temp;
+	FieldType* buffer_send_dev_pp = (buffer_send_dev != nullptr) ? (buffer_send_dev + temp) : nullptr;
+	FieldType* buffer_rec_dev_pp = (buffer_rec_dev != nullptr) ? (buffer_rec_dev + temp) : nullptr;
+	FieldType* halo_send_secondary = buffer_send_pp;
+	FieldType* halo_recv_secondary = buffer_rec_pp;
+	FieldType* halo_send_secondary_dev = buffer_send_dev_pp;
+	FieldType* halo_recv_secondary_dev = buffer_rec_dev_pp;
+#else
+	FieldType* halo_send_secondary = buffer_send;
+	FieldType* halo_recv_secondary = buffer_rec;
+	FieldType* halo_send_secondary_dev = buffer_send_dev;
+	FieldType* halo_recv_secondary_dev = buffer_rec_dev;
+#endif
+
+	FieldType* pointer_send_up;
+	FieldType* pointer_send_down;
+	FieldType* pointer_rec_up;
+	FieldType* pointer_rec_down;
+	MPI_Request dim1_req_a[2] = {MPI_REQUEST_NULL, MPI_REQUEST_NULL};
+	MPI_Request dim1_req_b[2] = {MPI_REQUEST_NULL, MPI_REQUEST_NULL};
+	MPI_Request dim0_req_a[2] = {MPI_REQUEST_NULL, MPI_REQUEST_NULL};
+	MPI_Request dim0_req_b[2] = {MPI_REQUEST_NULL, MPI_REQUEST_NULL};
+
+
+	pointer_send_up = data_ + ((lattice_->halo()+1)*lattice_->jump(lattice_->dim()-1) - 2*lattice_->halo()*lattice_->jump(lattice_->dim()-2))*components_;
+	pointer_rec_up = data_ + ((lattice_->halo()+1)*lattice_->jump(lattice_->dim()-1) - lattice_->halo()*lattice_->jump(lattice_->dim()-2))*components_;
+
+	pointer_send_down = data_ + buffer_size0 + lattice_->jump(lattice_->dim()-2)*lattice_->halo()*components_   ;
+	pointer_rec_down = data_ + buffer_size0;
+
+	if(parallel.grid_rank()[1]%2==0)
+	{
+		if (attributes.type == cudaMemoryTypeHost)
+		{
+			nvtxRangePushA("copy halo values (host)");
+			#pragma omp parallel for collapse(2)
+			for(int j=0;j<lattice_->sizeLocal(lattice_->dim()-1);j++)
+			{
+				for(int i=0;i<buffer_size1/lattice_->sizeLocal(lattice_->dim()-1);i++)
+				{
+					buffer_send[i+j*buffer_size1/lattice_->sizeLocal(lattice_->dim()-1)]= pointer_send_up[i+j*lattice_->jump(lattice_->dim()-1)*components_];
+				}
+			}
+			nvtxRangePop();
+		}
+		else
+		{
+			nvtxRangePushA("copy halo values (device)");
+			copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(pointer_send_up, buffer_send_dev, lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+
+			success = halo_comm_sync_default_stream();
+
+			if (success != cudaSuccess)
+			{
+				cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+							cudaError_t last_err = cudaGetLastError();
+							cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+				throw std::runtime_error("CUDA device synchronization failed");
+			}
+			nvtxRangePop();
+		}
+
+		nvtxRangePushA("send halo values");
+		if(parallel.grid_rank()[1]!=parallel.grid_size()[1]-1)
+		{
+			if (attributes.type != cudaMemoryTypeHost)
+			{
+				halo_comm_exchange_start_dim1(buffer_send, buffer_rec, buffer_size1, parallel.grid_rank()[1]+1, dim1_req_a);
+			}
+			else
+			{
+				halo_comm_exchange_dim1(buffer_send, buffer_rec, buffer_size1, parallel.grid_rank()[1]+1);
+			}
+		}
+		nvtxRangePop();
+
+		if (attributes.type != cudaMemoryTypeHost) // offload next send buffer copy
+		{
+			copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(pointer_send_down, halo_send_secondary_dev, lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+		}
+
+		nvtxRangePushA("receive halo values");
+		nvtxRangePop();
+
+		if (attributes.type == cudaMemoryTypeHost)
+		{
+			nvtxRangePushA("copy halo values (host)");
+			#pragma omp parallel for collapse(2)
+			for(int j=0;j<lattice_->sizeLocal(lattice_->dim()-1);j++)
+			{
+				for(int i=0;i<buffer_size1/lattice_->sizeLocal(lattice_->dim()-1);i++)
+				{
+					pointer_rec_up[i+j*lattice_->jump(lattice_->dim()-1)*components_] = buffer_rec[i+j*buffer_size1/lattice_->sizeLocal(lattice_->dim()-1)];
+				}
+			}
+
+			#pragma omp parallel for collapse(2)
+			for(int j=0;j<lattice_->sizeLocal(lattice_->dim()-1);j++)
+			{
+				for(int i=0;i<buffer_size1/lattice_->sizeLocal(lattice_->dim()-1);i++)
+				{
+					halo_send_secondary[i+j*buffer_size1/lattice_->sizeLocal(lattice_->dim()-1)] = pointer_send_down[i+j*lattice_->jump(lattice_->dim()-1)*components_];
+				}
+			}
+			nvtxRangePop();
+		}
+		else
+		{
+			nvtxRangePushA("copy halo values (device)");
+			success = halo_comm_sync_default_stream(); // finalize next send buffer copy
+
+			if (success != cudaSuccess)
+			{
+				cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+							cudaError_t last_err = cudaGetLastError();
+							cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+				throw std::runtime_error("CUDA device synchronization failed");
+			}
+
+			nvtxRangePushA("halo mpi wait");
+			halo_comm_exchange_wait(dim1_req_a);
+			nvtxRangePop();
+
+			// offload receive buffer copy
+			copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(buffer_rec_dev, pointer_rec_up, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+			nvtxRangePop();
+		}
+
+		nvtxRangePushA("send halo values");
+		if(parallel.grid_rank()[1] != 0)
+		{
+			if (attributes.type != cudaMemoryTypeHost)
+			{
+				halo_comm_exchange_start_dim1(halo_send_secondary, halo_recv_secondary, buffer_size1, parallel.grid_rank()[1]-1, dim1_req_b);
+			}
+			else
+			{
+				halo_comm_exchange_dim1(halo_send_secondary, halo_recv_secondary, buffer_size1, parallel.grid_rank()[1]-1);
+			}
+		}
+		else if(parallel.grid_size()[1]%2==0)
+		{
+			if (attributes.type != cudaMemoryTypeHost)
+			{
+				halo_comm_exchange_start_dim1(halo_send_secondary, halo_recv_secondary, buffer_size1, parallel.grid_size()[1]-1, dim1_req_b);
+			}
+			else
+			{
+				halo_comm_exchange_dim1(halo_send_secondary, halo_recv_secondary, buffer_size1, parallel.grid_size()[1]-1);
+			}
+		}
+		nvtxRangePop();
+
+		//redundant below
+		// if (attributes.type != cudaMemoryTypeHost)
+		// {
+		// 	success = halo_comm_sync_default_stream(); // finalize receive buffer copy
+
+		// 	if (success != cudaSuccess)
+		// 	{
+		// 		cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+		// 					cudaError_t last_err = cudaGetLastError();
+		// 					cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+		// 		throw std::runtime_error("CUDA device synchronization failed");
+		// 	}
+		// }
+
+		nvtxRangePushA("receive halo values");
+		nvtxRangePop();
+
+		if (attributes.type == cudaMemoryTypeHost)
+		{
+			nvtxRangePushA("copy halo values (host)");
+			#pragma omp parallel for collapse(2)
+			for(int j=0;j<lattice_->sizeLocal(lattice_->dim()-1);j++)
+			{
+				for(int i=0;i<buffer_size1/lattice_->sizeLocal(lattice_->dim()-1);i++)
+				{
+					pointer_rec_down[i+j*lattice_->jump(lattice_->dim()-1)*components_] = halo_recv_secondary[i+j*buffer_size1/lattice_->sizeLocal(lattice_->dim()-1)];
+				}
+			}
+			nvtxRangePop();
+		}
+		else
+		{
+			nvtxRangePushA("copy halo values (device)");
+			nvtxRangePushA("halo mpi wait");
+			halo_comm_exchange_wait(dim1_req_b);
+			nvtxRangePop();
+			copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(halo_recv_secondary_dev, pointer_rec_down, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+
+			success = halo_comm_sync_default_stream();
+
+			if (success != cudaSuccess)
+			{
+				cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+							cudaError_t last_err = cudaGetLastError();
+							cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+				throw std::runtime_error("CUDA device synchronization failed");
+			}
+			nvtxRangePop();
+		}
+	}
+	else
+	{
+		if (attributes.type == cudaMemoryTypeHost)
+		{
+			nvtxRangePushA("copy halo values (host)");
+			#pragma omp parallel for collapse(2)
+			for(int j=0;j<lattice_->sizeLocal(lattice_->dim()-1);j++)
+			{
+				for(int i=0;i<buffer_size1/lattice_->sizeLocal(lattice_->dim()-1);i++)
+				{
+					buffer_send[i+j*buffer_size1/lattice_->sizeLocal(lattice_->dim()-1)]= pointer_send_down[i+j*lattice_->jump(lattice_->dim()-1)*components_];
+				}
+			}
+			nvtxRangePop();
+		}
+		else
+		{
+			// offload send buffer copy
+			copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(pointer_send_down, buffer_send_dev, lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+		}
+
+		nvtxRangePushA("receive halo values");
+		if (attributes.type != cudaMemoryTypeHost)
+		{
+			halo_comm_exchange_start_dim1(buffer_send, buffer_rec, buffer_size1, parallel.grid_rank()[1]-1, dim1_req_a);
+		}
+		else
+		{
+			halo_comm_exchange_dim1(buffer_send, buffer_rec, buffer_size1, parallel.grid_rank()[1]-1);
+		}
+		nvtxRangePop();
+
+		if (attributes.type != cudaMemoryTypeHost)
+		{
+			nvtxRangePushA("copy halo values (device)");
+			success = halo_comm_sync_default_stream(); // finalize send buffer copy
+
+			if (success != cudaSuccess)
+			{
+				cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+							cudaError_t last_err = cudaGetLastError();
+							cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+				throw std::runtime_error("CUDA device synchronization failed");
+			}
+
+			nvtxRangePushA("halo mpi wait");
+			halo_comm_exchange_wait(dim1_req_a);
+			nvtxRangePop();
+
+			// offload receive buffer copy
+			copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(buffer_rec_dev, pointer_rec_down, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+			nvtxRangePop();
+		}
+
+		nvtxRangePushA("send halo values");
+		nvtxRangePop();
+
+		if (attributes.type == cudaMemoryTypeHost)
+		{
+			nvtxRangePushA("copy halo values (host)");
+			#pragma omp parallel for collapse(2)
+			for(int j=0;j<lattice_->sizeLocal(lattice_->dim()-1);j++)
+			{
+				for(int i=0;i<buffer_size1/lattice_->sizeLocal(lattice_->dim()-1);i++)
+				{
+					pointer_rec_down[i+j*lattice_->jump(lattice_->dim()-1)*components_] = buffer_rec[i+j*buffer_size1/lattice_->sizeLocal(lattice_->dim()-1)];
+				}
+			}
+
+			#pragma omp parallel for collapse(2)
+			for(int j=0;j<lattice_->sizeLocal(lattice_->dim()-1);j++)
+			{
+				for(int i=0;i<buffer_size1/lattice_->sizeLocal(lattice_->dim()-1);i++)
+				{
+					halo_send_secondary[i+j*buffer_size1/lattice_->sizeLocal(lattice_->dim()-1)] = pointer_send_up[i+j*lattice_->jump(lattice_->dim()-1)*components_];
+				}
+			}
+			nvtxRangePop();
+		}
+		else
+		{
+			// redundant below
+			// nvtxRangePushA("copy halo values (device)");
+			// success = halo_comm_sync_default_stream(); // finalize receive buffer copy
+
+			// if (success != cudaSuccess)
+			// {
+			// 	cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+			// 				cudaError_t last_err = cudaGetLastError();
+			// 				cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+			// 	throw std::runtime_error("CUDA device synchronization failed");
+			// }
+
+			// offload send buffer copy
+			copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(pointer_send_up, halo_send_secondary_dev, lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+			nvtxRangePop();
+		}
+
+		nvtxRangePushA("receive halo values");
+		if(parallel.grid_rank()[1]!=parallel.grid_size()[1]-1)
+		{
+			if (attributes.type != cudaMemoryTypeHost)
+			{
+				halo_comm_exchange_start_dim1(halo_send_secondary, halo_recv_secondary, buffer_size1, parallel.grid_rank()[1]+1, dim1_req_b);
+			}
+			else
+			{
+				halo_comm_exchange_dim1(halo_send_secondary, halo_recv_secondary, buffer_size1, parallel.grid_rank()[1]+1);
+			}
+		}
+		else
+		{
+			if (attributes.type != cudaMemoryTypeHost)
+			{
+				halo_comm_exchange_start_dim1(halo_send_secondary, halo_recv_secondary, buffer_size1, 0, dim1_req_b);
+			}
+			else
+			{
+				halo_comm_exchange_dim1(halo_send_secondary, halo_recv_secondary, buffer_size1, 0);
+			}
+		}
+		nvtxRangePop();
+
+		if (attributes.type != cudaMemoryTypeHost)
+		{
+			nvtxRangePushA("copy halo values (device)");
+			success = halo_comm_sync_default_stream(); // finalize send buffer copy
+
+			if (success != cudaSuccess)
+			{
+				cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+							cudaError_t last_err = cudaGetLastError();
+							cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+				throw std::runtime_error("CUDA device synchronization failed");
+			}
+
+			nvtxRangePushA("halo mpi wait");
+			halo_comm_exchange_wait(dim1_req_b);
+			nvtxRangePop();
+
+			// offload receive buffer copy
+			copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(halo_recv_secondary_dev, pointer_rec_up, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+			nvtxRangePop();
+		}
+
+		nvtxRangePushA("send halo values");
+		nvtxRangePop();
+
+		if (attributes.type == cudaMemoryTypeHost)
+		{
+			nvtxRangePushA("copy halo values (host)");
+			#pragma omp parallel for collapse(2)
+			for(int j=0;j<lattice_->sizeLocal(lattice_->dim()-1);j++)
+			{
+				for(int i=0;i<buffer_size1/lattice_->sizeLocal(lattice_->dim()-1);i++)
+				{
+					pointer_rec_up[i+j*lattice_->jump(lattice_->dim()-1)*components_] = halo_recv_secondary[i+j*buffer_size1/lattice_->sizeLocal(lattice_->dim()-1)];
+				}
+			}
+			nvtxRangePop();
+		}
+		else
+		{
+			nvtxRangePushA("copy halo values (device)");
+			success = halo_comm_sync_default_stream(); // finalize receive buffer copy
+
+			if (success != cudaSuccess)
+			{
+				cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+							cudaError_t last_err = cudaGetLastError();
+							cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+				throw std::runtime_error("CUDA device synchronization failed");
+			}
+			nvtxRangePop();
+		}
+	}
+
+
+	if(parallel.grid_size()[1]%2!=0)
+	{
+		if(parallel.grid_rank()[1]==0)
+		{
+			if (attributes.type == cudaMemoryTypeHost)
+			{
+				nvtxRangePushA("copy halo values (host)");
+				#pragma omp parallel for collapse(2)
+				for(int j=0;j<lattice_->sizeLocal(lattice_->dim()-1);j++)
+				{
+					for(int i=0;i<buffer_size1/lattice_->sizeLocal(lattice_->dim()-1);i++)
+					{
+						buffer_send[i+j*buffer_size1/lattice_->sizeLocal(lattice_->dim()-1)]= pointer_send_down[i+j*lattice_->jump(lattice_->dim()-1)*components_];
+
+					}
+				}
+				nvtxRangePop();
+			}
+			else
+			{
+				nvtxRangePushA("copy halo values (device)");
+				copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(pointer_send_down, buffer_send_dev, lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+
+				success = halo_comm_sync_default_stream();
+
+				if (success != cudaSuccess)
+				{
+					cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+							cudaError_t last_err = cudaGetLastError();
+							cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+					throw std::runtime_error("CUDA device synchronization failed");
+				}
+				nvtxRangePop();
+			}
+
+			nvtxRangePushA("send halo values");
+			halo_comm_exchange_dim1(buffer_send, buffer_rec, buffer_size1, parallel.grid_size()[1]-1);
+			nvtxRangePop();
+
+			if (attributes.type == cudaMemoryTypeHost)
+			{
+				nvtxRangePushA("copy halo values (host)");
+				#pragma omp parallel for collapse(2)
+				for(int j=0;j<lattice_->sizeLocal(lattice_->dim()-1);j++)
+				{
+					for(int i=0;i<buffer_size1/lattice_->sizeLocal(lattice_->dim()-1);i++)
+					{
+						pointer_rec_down[i+j*lattice_->jump(lattice_->dim()-1)*components_] = buffer_rec[i+j*buffer_size1/lattice_->sizeLocal(lattice_->dim()-1)];
+					}
+				}
+				nvtxRangePop();
+			}
+			else
+			{
+				nvtxRangePushA("copy halo values (device)");
+				copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(buffer_rec_dev, pointer_rec_down, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+
+				success = halo_comm_sync_default_stream();
+
+				if (success != cudaSuccess)
+				{
+					cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+							cudaError_t last_err = cudaGetLastError();
+							cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+					throw std::runtime_error("CUDA device synchronization failed");
+				}
+				nvtxRangePop();
+			}
+		}
+		if(parallel.grid_rank()[1]==parallel.grid_size()[1]-1)
+		{
+			if (attributes.type == cudaMemoryTypeHost)
+			{
+				nvtxRangePushA("copy halo values (host)");
+				#pragma omp parallel for collapse(2)
+				for(int j=0;j<lattice_->sizeLocal(lattice_->dim()-1);j++)
+				{
+					for(int i=0;i<buffer_size1/lattice_->sizeLocal(lattice_->dim()-1);i++)
+					{
+						buffer_send[i+j*buffer_size1/lattice_->sizeLocal(lattice_->dim()-1)]= pointer_send_up[i+j*lattice_->jump(lattice_->dim()-1)*components_];
+					}
+				}
+				nvtxRangePop();
+			}
+			else
+			{
+				// offload send buffer copy
+				copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(pointer_send_up, buffer_send_dev, lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+			}
+
+			nvtxRangePushA("receive halo values");
+			if (attributes.type != cudaMemoryTypeHost)
+			{
+				halo_comm_exchange_start_dim1(buffer_send, buffer_rec, buffer_size1, 0, dim1_req_a);
+			}
+			else
+			{
+				halo_comm_exchange_dim1(buffer_send, buffer_rec, buffer_size1, 0);
+			}
+			nvtxRangePop();
+
+			if (attributes.type != cudaMemoryTypeHost)
+			{
+				nvtxRangePushA("copy halo values (device)");
+				success = halo_comm_sync_default_stream(); // finalize send buffer copy
+
+				if (success != cudaSuccess)
+				{
+					cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+							cudaError_t last_err = cudaGetLastError();
+							cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+					throw std::runtime_error("CUDA device synchronization failed");
+				}
+
+				nvtxRangePushA("halo mpi wait");
+				halo_comm_exchange_wait(dim1_req_a);
+				nvtxRangePop();
+
+				// offload receive buffer copy
+				copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(buffer_rec_dev, pointer_rec_up, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+				nvtxRangePop();
+			}
+
+			nvtxRangePushA("send halo values");
+			nvtxRangePop();
+
+			if (attributes.type == cudaMemoryTypeHost)
+			{
+				nvtxRangePushA("copy halo values (host)");
+				#pragma omp parallel for collapse(2)
+				for(int j=0;j<lattice_->sizeLocal(lattice_->dim()-1);j++)
+				{
+					for(int i=0;i<buffer_size1/lattice_->sizeLocal(lattice_->dim()-1);i++)
+					{
+						pointer_rec_up[i+j*lattice_->jump(lattice_->dim()-1)*components_] = buffer_rec[i+j*buffer_size1/lattice_->sizeLocal(lattice_->dim()-1)];
+
+					}
+				}
+				nvtxRangePop();
+			}
+			else
+			{
+				nvtxRangePushA("copy halo values (device)");
+				success = halo_comm_sync_default_stream(); // finalize receive buffer copy
+
+				if (success != cudaSuccess)
+				{
+					cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+							cudaError_t last_err = cudaGetLastError();
+							cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+					throw std::runtime_error("CUDA device synchronization failed");
+				}
+				nvtxRangePop();
+			}
+		}
+	}
+
+	pointer_send_up = data_ + lattice_->sitesLocalGross() * components_ - 2*buffer_size0;
+	pointer_rec_up = data_ + lattice_->sitesLocalGross() * components_ - buffer_size0;
+
+	pointer_send_down = data_ + buffer_size0;
+	pointer_rec_down = data_;
+
+	if(parallel.grid_rank()[0]%2==0)
+	{
+		if(parallel.grid_rank()[0]!=parallel.grid_size()[0]-1)
+		{
+			if (attributes.type != cudaMemoryTypeHost) // can't just send/rec into the data array, use send/rec buffers
+			{
+				nvtxRangePushA("copy halo values (device)");
+				copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(pointer_send_up, buffer_send_dev, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+
+				success = halo_comm_sync_default_stream();
+
+				if (success != cudaSuccess)
+				{
+					cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+							cudaError_t last_err = cudaGetLastError();
+							cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+					throw std::runtime_error("CUDA device synchronization failed");
+				}
+
+				pointer_send_up = buffer_send;
+				pointer_rec_up = buffer_rec;
+				nvtxRangePop();
+			}
+
+			nvtxRangePushA("send/rec halo values");
+			if (attributes.type != cudaMemoryTypeHost)
+			{
+				halo_comm_exchange_start_dim0(pointer_send_up, pointer_rec_up, buffer_size0, parallel.grid_rank()[0]+1, dim0_req_a);
+			}
+			else
+			{
+				halo_comm_exchange_dim0(pointer_send_up, pointer_rec_up, buffer_size0, parallel.grid_rank()[0]+1);
+			}
+			nvtxRangePop();
+		}
+
+		if (attributes.type != cudaMemoryTypeHost && (parallel.grid_rank()[0] != 0 || parallel.grid_size()[0]%2==0))
+		{
+			nvtxRangePushA("copy halo values (device)");
+			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(pointer_send_down, halo_send_secondary_dev, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+
+			success = halo_comm_sync_default_stream();
+
+			if (success != cudaSuccess)
+			{
+				cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+							cudaError_t last_err = cudaGetLastError();
+							cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+				throw std::runtime_error("CUDA device synchronization failed");
+			}
+
+			pointer_send_down = halo_send_secondary;
+			pointer_rec_down = halo_recv_secondary;
+			nvtxRangePop();
+		}
+
+		if(parallel.grid_rank()[0] != 0)
+		{
+			nvtxRangePushA("send/rec halo values");
+			if (attributes.type != cudaMemoryTypeHost)
+			{
+				halo_comm_exchange_start_dim0(pointer_send_down, pointer_rec_down, buffer_size0, parallel.grid_rank()[0]-1, dim0_req_b);
+			}
+			else
+			{
+				halo_comm_exchange_dim0(pointer_send_down, pointer_rec_down, buffer_size0, parallel.grid_rank()[0]-1);
+			}
+			nvtxRangePop();
+		}
+		else if(parallel.grid_size()[0]%2==0)
+		{
+			nvtxRangePushA("send/rec halo values");
+			if (attributes.type != cudaMemoryTypeHost)
+			{
+				halo_comm_exchange_start_dim0(pointer_send_down, pointer_rec_down, buffer_size0, parallel.grid_size()[0]-1, dim0_req_b);
+			}
+			else
+			{
+				halo_comm_exchange_dim0(pointer_send_down, pointer_rec_down, buffer_size0, parallel.grid_size()[0]-1);
+			}
+			nvtxRangePop();
+		}
+
+		if (attributes.type != cudaMemoryTypeHost && parallel.grid_rank()[0] != parallel.grid_size()[0]-1)
+		{
+			nvtxRangePushA("copy halo values (device)");
+			nvtxRangePushA("halo mpi wait");
+			halo_comm_exchange_wait(dim0_req_a);
+			nvtxRangePop();
+			pointer_rec_up = data_ + lattice_->sitesLocalGross() * components_ - buffer_size0;
+
+			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(buffer_rec_dev, pointer_rec_up, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+
+			success = halo_comm_sync_default_stream();
+
+			if (success != cudaSuccess)
+			{
+				cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+							cudaError_t last_err = cudaGetLastError();
+							cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+				throw std::runtime_error("CUDA device synchronization failed");
+			}
+			nvtxRangePop();
+		}
+
+		if (attributes.type != cudaMemoryTypeHost && (parallel.grid_rank()[0] != 0 || parallel.grid_size()[0]%2==0))
+		{
+			nvtxRangePushA("copy halo values (device)");
+			nvtxRangePushA("halo mpi wait");
+			halo_comm_exchange_wait(dim0_req_b);
+			nvtxRangePop();
+			pointer_rec_down = data_;
+
+			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(halo_recv_secondary_dev, pointer_rec_down, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+
+			success = halo_comm_sync_default_stream();
+
+			if (success != cudaSuccess)
+			{
+				cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+							cudaError_t last_err = cudaGetLastError();
+							cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+				throw std::runtime_error("CUDA device synchronization failed");
+			}
+			nvtxRangePop();
+		}
+	}
+	else
+	{
+		if (attributes.type != cudaMemoryTypeHost)
+		{
+			nvtxRangePushA("copy halo values (device)");
+			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(pointer_send_down, buffer_send_dev, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+
+			success = halo_comm_sync_default_stream();
+
+			if (success != cudaSuccess)
+			{
+				cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+							cudaError_t last_err = cudaGetLastError();
+							cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+				throw std::runtime_error("CUDA device synchronization failed");
+			}
+
+			pointer_send_down = buffer_send;
+
+			nvtxRangePop();
+
+			nvtxRangePushA("receive halo values");
+			halo_comm_exchange_start_dim0(pointer_send_down, buffer_rec, buffer_size0, parallel.grid_rank()[0]-1, dim0_req_a);
+			nvtxRangePop();
+
+			nvtxRangePushA("copy halo values (device)");
+			pointer_send_down = data_ + buffer_size0;
+			pointer_rec_up = halo_recv_secondary;
+
+			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(pointer_send_up, halo_send_secondary_dev, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+
+			// below is redundant
+			// success = halo_comm_sync_default_stream();
+
+			// if (success != cudaSuccess)
+			// {
+			// 	cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+			// 				cudaError_t last_err = cudaGetLastError();
+			// 				cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+			// 	throw std::runtime_error("CUDA device synchronization failed");
+			// }
+
+			nvtxRangePushA("halo mpi wait");
+			halo_comm_exchange_wait(dim0_req_a);
+			nvtxRangePop();
+
+			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(buffer_rec_dev, pointer_rec_down, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+
+			success = halo_comm_sync_default_stream();
+
+			if (success != cudaSuccess)
+			{
+				cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+							cudaError_t last_err = cudaGetLastError();
+							cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+				throw std::runtime_error("CUDA device synchronization failed");
+			}
+
+			pointer_send_up = halo_send_secondary;
+			nvtxRangePop();
+		}
+		else
+		{
+			nvtxRangePushA("receive halo values");
+			parallel.receive_dim0( pointer_rec_down, buffer_size0, parallel.grid_rank()[0]-1);
+			nvtxRangePop();
+		}
+
+		nvtxRangePushA("send halo values");
+		if (attributes.type == cudaMemoryTypeHost)
+		{
+			parallel.send_dim0( pointer_send_down, buffer_size0, parallel.grid_rank()[0]-1);
+		}
+		nvtxRangePop();
+
+		nvtxRangePushA("rec/send halo values");
+		if(parallel.grid_rank()[0]!=parallel.grid_size()[0]-1)
+		{
+			if (attributes.type != cudaMemoryTypeHost)
+			{
+				halo_comm_exchange_start_dim0(pointer_send_up, pointer_rec_up, buffer_size0, parallel.grid_rank()[0]+1, dim0_req_b);
+			}
+			else
+			{
+				halo_comm_exchange_dim0(pointer_send_up, pointer_rec_up, buffer_size0, parallel.grid_rank()[0]+1);
+			}
+		}
+		else
+		{
+			if (attributes.type != cudaMemoryTypeHost)
+			{
+				halo_comm_exchange_start_dim0(pointer_send_up, pointer_rec_up, buffer_size0, 0, dim0_req_b);
+			}
+			else
+			{
+				halo_comm_exchange_dim0(pointer_send_up, pointer_rec_up, buffer_size0, 0);
+			}
+		}
+		nvtxRangePop();
+
+		if (attributes.type != cudaMemoryTypeHost)
+		{
+			nvtxRangePushA("copy halo values (device)");
+			nvtxRangePushA("halo mpi wait");
+			halo_comm_exchange_wait(dim0_req_b);
+			nvtxRangePop();
+			pointer_send_up = data_ + lattice_->sitesLocalGross() * components_ - 2*buffer_size0;
+			pointer_rec_up = data_ + lattice_->sitesLocalGross() * components_ - buffer_size0;
+
+			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(halo_recv_secondary_dev, pointer_rec_up, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+
+			success = halo_comm_sync_default_stream();
+
+			if (success != cudaSuccess)
+			{
+				cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+							cudaError_t last_err = cudaGetLastError();
+							cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+				throw std::runtime_error("CUDA device synchronization failed");
+			}
+			nvtxRangePop();
+		}
+	}
+
+	if(parallel.grid_size()[0]%2!=0)
+	{
+		if(parallel.grid_rank()[0]==0)
+		{
+			if (attributes.type != cudaMemoryTypeHost)
+			{
+			nvtxRangePushA("copy halo values (device)");
+			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(pointer_send_down, halo_send_secondary_dev, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+
+				success = halo_comm_sync_default_stream();
+
+				if (success != cudaSuccess)
+				{
+					cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+							cudaError_t last_err = cudaGetLastError();
+							cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+					throw std::runtime_error("CUDA device synchronization failed");
+				}
+
+			pointer_send_down = halo_send_secondary;
+			pointer_rec_down = halo_recv_secondary;
+			nvtxRangePop();
+		}
+
+			nvtxRangePushA("send/rec halo values");
+			halo_comm_exchange_dim0(pointer_send_down, pointer_rec_down, buffer_size0, parallel.grid_size()[0]-1);
+			nvtxRangePop();
+
+			if (attributes.type != cudaMemoryTypeHost)
+			{
+			nvtxRangePushA("copy halo values (device)");
+			pointer_rec_down = data_;
+
+			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(halo_recv_secondary_dev, pointer_rec_down, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+
+				success = halo_comm_sync_default_stream();
+
+				if (success != cudaSuccess)
+				{
+					cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+							cudaError_t last_err = cudaGetLastError();
+							cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+					throw std::runtime_error("CUDA device synchronization failed");
+				}
+				nvtxRangePop();
+			}
+		}
+		if(parallel.grid_rank()[0]==parallel.grid_size()[0]-1)
+		{
+			if (attributes.type != cudaMemoryTypeHost)
+			{
+			nvtxRangePushA("copy halo values (device)");
+			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(pointer_send_up, halo_send_secondary_dev, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+
+				success = halo_comm_sync_default_stream();
+
+				if (success != cudaSuccess)
+				{
+					cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+							cudaError_t last_err = cudaGetLastError();
+							cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+					throw std::runtime_error("CUDA device synchronization failed");
+				}
+
+			pointer_send_up = halo_send_secondary;
+			pointer_rec_up = halo_recv_secondary;
+			nvtxRangePop();
+		}
+
+			nvtxRangePushA("rec/send halo values");
+			halo_comm_exchange_dim0(pointer_send_up, pointer_rec_up, buffer_size0, 0);
+			nvtxRangePop();
+
+			if (attributes.type != cudaMemoryTypeHost)
+			{
+			nvtxRangePushA("copy halo values (device)");
+			pointer_rec_up = data_ + lattice_->sitesLocalGross() * components_ - buffer_size0;
+
+			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(halo_recv_secondary_dev, pointer_rec_up, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+
+				success = halo_comm_sync_default_stream();
+
+				if (success != cudaSuccess)
+				{
+					cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cannot synchronize device." << endl;
+							cudaError_t last_err = cudaGetLastError();
+							cout << "LATfield2::Field::updateHaloComms  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+					throw std::runtime_error("CUDA device synchronization failed");
+				}
+				nvtxRangePop();
+			}
+		}
+	}
+
+	// if (buffers_mapped)
+	// {
+	// 	cudaFreeHost(buffer_send);
+	// 	cudaFreeHost(buffer_rec);
+	// }
+	// else
+	// {
+	// 	delete[] buffer_send;
+	// 	delete[] buffer_rec;
+	// }
 }
 
 template <class FieldType>
