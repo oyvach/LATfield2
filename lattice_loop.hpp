@@ -7,7 +7,8 @@ using namespace LATfield2;
 
 // generic loop for lattice
 template <typename ForEachFunct, int noutput = 0>
-__global__ void lattice_for_each(ForEachFunct funct, int numpts, Field<Real> ** fields, int nfields, double * params, double * output, int * reduce_type, void ** vparams = nullptr)
+__global__ void lattice_for_each(ForEachFunct funct, int numpts, Field<Real> ** fields, int nfields, double * params,
+                                double * output, int * reduce_type,void ** vparams = nullptr, int intoHalo = 0)
 {
     int coord1 = blockIdx.x;
     int coord2 = blockIdx.y;
@@ -47,7 +48,10 @@ __global__ void lattice_for_each(ForEachFunct funct, int numpts, Field<Real> ** 
     {
         for (int i = 0; i < nfields; i++)
         {
-            sites[i] = Site(fields[i]->lattice(), fields[i]->lattice().siteFirst() 
+            const long base = fields[i]->lattice().siteFirst() -
+                              (long) intoHalo * (fields[i]->lattice().jump(0) + fields[i]->lattice().jump(1) + fields[i]->lattice().jump(2));
+
+            sites[i] = Site(fields[i]->lattice(), base 
                             + idx*fields[i]->lattice().jump(0) 
                             + coord1*fields[i]->lattice().jump(1)
                             + coord2*fields[i]->lattice().jump(2));

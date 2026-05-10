@@ -129,7 +129,7 @@ public:
 #endif
 
 
-  void preallocate();
+  void preallocate(int extra = 0);
   void execute(int fft_type);
 
 private:
@@ -1062,9 +1062,9 @@ void PlanFFT<compType>::initialize(Field<double>*  rfield,Field<compType>*   kfi
 #endif
 
 template<class compType>
-void PlanFFT<compType>::preallocate()
+void PlanFFT<compType>::preallocate(int extra)
 {
-  long halo_pad = 2 * ((rHalo_ > kHalo_) ? rHalo_ : kHalo_);
+  long halo_pad = 2 * (((rHalo_ > kHalo_) ? rHalo_ : kHalo_) + extra);
   long required_real = (long)(rSize_[0] + halo_pad) * (long)(rSizeLocal_[1] + halo_pad) * (long)(rSizeLocal_[2] + halo_pad);
   long required_fourier = (long)(((r2cSize_ > 0) ? r2cSize_ : rSize_[0]) + halo_pad) * (long)(rSizeLocal_[1] + halo_pad) * (long)(rSizeLocal_[2] + halo_pad);
   long required_capacity = required_real;

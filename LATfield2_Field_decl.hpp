@@ -1163,6 +1163,21 @@ __global__ void copy_halo_values (FieldType * src, FieldType * dest, int stride_
 	}
 }
 
+template <class FieldType>
+inline cudaError_t copy_halo_values_2d_async(FieldType * src, FieldType * dest, int stride_src, int stride_dest, int i_max, int j_max)
+{
+	return cudaMemcpy2DAsync(
+		dest,
+		static_cast<size_t>(stride_dest) * sizeof(FieldType),
+		src,
+		static_cast<size_t>(stride_src) * sizeof(FieldType),
+		static_cast<size_t>(i_max) * sizeof(FieldType),
+		static_cast<size_t>(j_max),
+		cudaMemcpyDefault,
+		0
+	);
+}
+
 inline cudaError_t halo_comm_sync_default_stream()
 {
 #ifdef HALO_COMMS_EVENT_SYNC
@@ -1451,6 +1466,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 		{
 			nvtxRangePushA("copy halo values (device)");
 			copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(pointer_send_up, buffer_send_dev, lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+			// copy_halo_values_2d_async(pointer_send_up, buffer_send_dev, lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->sizeLocal(lattice_->dim()-1));
 
 			success = halo_comm_sync_default_stream();
 
@@ -1481,6 +1497,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 		if (attributes.type != cudaMemoryTypeHost) // offload next send buffer copy
 		{
 			copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(pointer_send_down, halo_send_secondary_dev, lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+			// copy_halo_values_2d_async(pointer_send_down, halo_send_secondary_dev, lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->sizeLocal(lattice_->dim()-1));
 		}
 
 		nvtxRangePushA("receive halo values");
@@ -1527,6 +1544,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 
 			// offload receive buffer copy
 			copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(buffer_rec_dev, pointer_rec_up, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+			// copy_halo_values_2d_async(buffer_rec_dev, pointer_rec_up, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->sizeLocal(lattice_->dim()-1));
 			nvtxRangePop();
 		}
 
@@ -1592,6 +1610,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 			halo_comm_exchange_wait(dim1_req_b);
 			nvtxRangePop();
 			copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(halo_recv_secondary_dev, pointer_rec_down, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+			// copy_halo_values_2d_async(halo_recv_secondary_dev, pointer_rec_down, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->sizeLocal(lattice_->dim()-1));
 
 			success = halo_comm_sync_default_stream();
 
@@ -1624,6 +1643,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 		{
 			// offload send buffer copy
 			copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(pointer_send_down, buffer_send_dev, lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+			// copy_halo_values_2d_async(pointer_send_down, buffer_send_dev, lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->sizeLocal(lattice_->dim()-1));
 		}
 
 		nvtxRangePushA("receive halo values");
@@ -1656,6 +1676,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 
 			// offload receive buffer copy
 			copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(buffer_rec_dev, pointer_rec_down, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+			// copy_halo_values_2d_async(buffer_rec_dev, pointer_rec_down, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->sizeLocal(lattice_->dim()-1));
 			nvtxRangePop();
 		}
 
@@ -1700,6 +1721,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 
 			// offload send buffer copy
 			copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(pointer_send_up, halo_send_secondary_dev, lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+			// copy_halo_values_2d_async(pointer_send_up, halo_send_secondary_dev, lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->sizeLocal(lattice_->dim()-1));
 			nvtxRangePop();
 		}
 
@@ -1747,6 +1769,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 
 			// offload receive buffer copy
 			copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(halo_recv_secondary_dev, pointer_rec_up, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+			// copy_halo_values_2d_async(halo_recv_secondary_dev, pointer_rec_up, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->sizeLocal(lattice_->dim()-1));
 			nvtxRangePop();
 		}
 
@@ -1805,6 +1828,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 			{
 				nvtxRangePushA("copy halo values (device)");
 				copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(pointer_send_down, buffer_send_dev, lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+				// copy_halo_values_2d_async(pointer_send_down, buffer_send_dev, lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->sizeLocal(lattice_->dim()-1));
 
 				success = halo_comm_sync_default_stream();
 
@@ -1839,6 +1863,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 			{
 				nvtxRangePushA("copy halo values (device)");
 				copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(buffer_rec_dev, pointer_rec_down, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+				// copy_halo_values_2d_async(buffer_rec_dev, pointer_rec_down, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->sizeLocal(lattice_->dim()-1));
 
 				success = halo_comm_sync_default_stream();
 
@@ -1871,6 +1896,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 			{
 				// offload send buffer copy
 				copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(pointer_send_up, buffer_send_dev, lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+				// copy_halo_values_2d_async(pointer_send_up, buffer_send_dev, lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->sizeLocal(lattice_->dim()-1));
 			}
 
 			nvtxRangePushA("receive halo values");
@@ -1903,6 +1929,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 
 				// offload receive buffer copy
 				copy_halo_values<<<lattice_->sizeLocal(lattice_->dim()-1), 128>>>(buffer_rec_dev, pointer_rec_up, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1));
+				// copy_halo_values_2d_async(buffer_rec_dev, pointer_rec_up, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->jump(lattice_->dim()-1)*components_, buffer_size1/lattice_->sizeLocal(lattice_->dim()-1), lattice_->sizeLocal(lattice_->dim()-1));
 				nvtxRangePop();
 			}
 
@@ -1954,6 +1981,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 			{
 				nvtxRangePushA("copy halo values (device)");
 				copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(pointer_send_up, buffer_send_dev, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+				// copy_halo_values_2d_async(pointer_send_up, buffer_send_dev, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), buffer_size0/lattice_->jump(lattice_->dim()-2));
 
 				success = halo_comm_sync_default_stream();
 
@@ -1986,6 +2014,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 		{
 			nvtxRangePushA("copy halo values (device)");
 			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(pointer_send_down, halo_send_secondary_dev, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+			// copy_halo_values_2d_async(pointer_send_down, halo_send_secondary_dev, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), buffer_size0/lattice_->jump(lattice_->dim()-2));
 
 			success = halo_comm_sync_default_stream();
 
@@ -2038,6 +2067,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 			pointer_rec_up = data_ + lattice_->sitesLocalGross() * components_ - buffer_size0;
 
 			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(buffer_rec_dev, pointer_rec_up, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+			// copy_halo_values_2d_async(buffer_rec_dev, pointer_rec_up, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), buffer_size0/lattice_->jump(lattice_->dim()-2));
 
 			success = halo_comm_sync_default_stream();
 
@@ -2060,6 +2090,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 			pointer_rec_down = data_;
 
 			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(halo_recv_secondary_dev, pointer_rec_down, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+			// copy_halo_values_2d_async(halo_recv_secondary_dev, pointer_rec_down, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), buffer_size0/lattice_->jump(lattice_->dim()-2));
 
 			success = halo_comm_sync_default_stream();
 
@@ -2079,6 +2110,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 		{
 			nvtxRangePushA("copy halo values (device)");
 			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(pointer_send_down, buffer_send_dev, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+			// copy_halo_values_2d_async(pointer_send_down, buffer_send_dev, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), buffer_size0/lattice_->jump(lattice_->dim()-2));
 
 			success = halo_comm_sync_default_stream();
 
@@ -2103,6 +2135,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 			pointer_rec_up = halo_recv_secondary;
 
 			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(pointer_send_up, halo_send_secondary_dev, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+			// copy_halo_values_2d_async(pointer_send_up, halo_send_secondary_dev, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), buffer_size0/lattice_->jump(lattice_->dim()-2));
 
 			// below is redundant
 			// success = halo_comm_sync_default_stream();
@@ -2120,6 +2153,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 			nvtxRangePop();
 
 			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(buffer_rec_dev, pointer_rec_down, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+			// copy_halo_values_2d_async(buffer_rec_dev, pointer_rec_down, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), buffer_size0/lattice_->jump(lattice_->dim()-2));
 
 			success = halo_comm_sync_default_stream();
 
@@ -2183,6 +2217,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 			pointer_rec_up = data_ + lattice_->sitesLocalGross() * components_ - buffer_size0;
 
 			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(halo_recv_secondary_dev, pointer_rec_up, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+			// copy_halo_values_2d_async(halo_recv_secondary_dev, pointer_rec_up, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), buffer_size0/lattice_->jump(lattice_->dim()-2));
 
 			success = halo_comm_sync_default_stream();
 
@@ -2205,6 +2240,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 			{
 			nvtxRangePushA("copy halo values (device)");
 			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(pointer_send_down, halo_send_secondary_dev, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+			// copy_halo_values_2d_async(pointer_send_down, halo_send_secondary_dev, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), buffer_size0/lattice_->jump(lattice_->dim()-2));
 
 				success = halo_comm_sync_default_stream();
 
@@ -2231,6 +2267,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 			pointer_rec_down = data_;
 
 			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(halo_recv_secondary_dev, pointer_rec_down, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+			// copy_halo_values_2d_async(halo_recv_secondary_dev, pointer_rec_down, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), buffer_size0/lattice_->jump(lattice_->dim()-2));
 
 				success = halo_comm_sync_default_stream();
 
@@ -2250,6 +2287,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 			{
 			nvtxRangePushA("copy halo values (device)");
 			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(pointer_send_up, halo_send_secondary_dev, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+			// copy_halo_values_2d_async(pointer_send_up, halo_send_secondary_dev, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), buffer_size0/lattice_->jump(lattice_->dim()-2));
 
 				success = halo_comm_sync_default_stream();
 
@@ -2276,6 +2314,7 @@ void Field<FieldType>::updateHaloCommsCustom(FieldType* buffer_send, FieldType* 
 			pointer_rec_up = data_ + lattice_->sitesLocalGross() * components_ - buffer_size0;
 
 			copy_halo_values<<<buffer_size0/lattice_->jump(lattice_->dim()-2), 128>>>(halo_recv_secondary_dev, pointer_rec_up, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2));
+			// copy_halo_values_2d_async(halo_recv_secondary_dev, pointer_rec_up, lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), lattice_->jump(lattice_->dim()-2), buffer_size0/lattice_->jump(lattice_->dim()-2));
 
 				success = halo_comm_sync_default_stream();
 
