@@ -1,6 +1,8 @@
 #ifndef LATFIELD2_FIELD_DECL_HPP
 #define LATFIELD2_FIELD_DECL_HPP
 
+#include <cstdlib>
+
 /*! \file LATfield2_Field.hpp
  \brief LATfield2_Field.hpp contain the class Field definition.
  \author David Daverio, Neil Bevis
@@ -274,6 +276,9 @@ class Field
 		void updateHalo(bool debug = false);
 		
 		void updateHaloCustom( FieldType* buffer_send, FieldType* buffer_rec, FieldType* buffer_send_dev, FieldType* buffer_rec_dev,
+										int &buffer_size0, int &buffer_size1, cudaPointerAttributes &attributes);
+
+		void updateHaloCustom2( FieldType* buffer_send, FieldType* buffer_rec, FieldType* buffer_send_dev, FieldType* buffer_rec_dev,
 										int &buffer_size0, int &buffer_size1, cudaPointerAttributes &attributes);
 
 		void setUpHaloBuffersCustom( FieldType*& buffer_send, FieldType*& buffer_rec, FieldType*& buffer_send_dev, FieldType*& buffer_rec_dev,
@@ -1015,6 +1020,8 @@ __global__ void copy_halo_values (FieldType * data, int size_1, int jump_1, int 
 	}
 }
 
+inline bool halo_defer_internal_sync();
+
 template <class FieldType>
 void Field<FieldType>::updateHaloCustom(FieldType* buffer_send, FieldType* buffer_rec, FieldType* buffer_send_dev, FieldType* buffer_rec_dev,
 										int &buffer_size0, int &buffer_size1, cudaPointerAttributes &attributes)
@@ -1071,20 +1078,41 @@ void Field<FieldType>::updateHaloCustom(FieldType* buffer_send, FieldType* buffe
 
 		if (parallel.size() <= 1)
 		{
-			auto success = cudaDeviceSynchronize(); // improvement
-
-			if (success != cudaSuccess)
+			if (!halo_defer_internal_sync())
 			{
-				cout << "LATfield2::Field::updateHalo  :process " << parallel.rank() << " cannot synchronize device." << endl;
-							cudaError_t last_err = cudaGetLastError();
-							cout << "LATfield2::Field::updateHalo  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
-				throw std::runtime_error("CUDA device synchronization failed");
+				auto success = cudaDeviceSynchronize(); // improvement
+
+				if (success != cudaSuccess)
+				{
+					cout << "LATfield2::Field::updateHalo  :process " << parallel.rank() << " cannot synchronize device." << endl;
+								cudaError_t last_err = cudaGetLastError();
+								cout << "LATfield2::Field::updateHalo  :process " << parallel.rank() << " cudaDeviceSynchronize error: " << cudaGetErrorString(success) << " (" << (int)success << ")" << "; last error: " << cudaGetErrorString(last_err) << " (" << (int)last_err << ")" << endl;
+					throw std::runtime_error("CUDA device synchronization failed");
+				}
+			}
+			else
+			{
+				auto launch_status = cudaPeekAtLastError();
+				if (launch_status != cudaSuccess)
+				{
+					cout << "LATfield2::Field::updateHalo  :process " << parallel.rank() << " kernel launch failed in deferred-sync mode." << endl;
+					cout << "LATfield2::Field::updateHalo  :process " << parallel.rank() << " launch error: " << cudaGetErrorString(launch_status) << " (" << (int)launch_status << ")" << endl;
+					throw std::runtime_error("CUDA kernel launch failed in deferred-sync mode");
+				}
 			}
 		}
 		nvtxRangePop();
 	}
 
 	if( parallel.size()>1 ) { updateHaloCommsCustom( buffer_send, buffer_rec, buffer_send_dev, buffer_rec_dev, buffer_size0, buffer_size1, attributes); }
+}
+
+template <class FieldType>
+void Field<FieldType>::updateHaloCustom2(FieldType* buffer_send, FieldType* buffer_rec, FieldType* buffer_send_dev, FieldType* buffer_rec_dev,
+										int &buffer_size0, int &buffer_size1, cudaPointerAttributes &attributes)
+{
+	updateHaloCustom(buffer_send, buffer_rec, buffer_send_dev, buffer_rec_dev,
+						buffer_size0, buffer_size1, attributes);
 }
 
 template <class FieldType>
@@ -1178,8 +1206,22 @@ inline cudaError_t copy_halo_values_2d_async(FieldType * src, FieldType * dest, 
 	);
 }
 
+inline bool halo_defer_internal_sync()
+{
+	// Optional fast path: caller provides dependency fences (e.g. before RK kernels).
+	// Enable with LATFIELD2_HALO_DEFER_SYNC=1.
+	const char *env_value = std::getenv("LATFIELD2_HALO_DEFER_SYNC");
+	return (env_value != nullptr && env_value[0] != '\0' && env_value[0] != '0');
+}
+
 inline cudaError_t halo_comm_sync_default_stream()
 {
+	// In MPI runs, this sync is required before MPI starts using halo buffers.
+	// Deferring it can race pack kernels against MPI send/recv and corrupt comm state.
+	if (halo_defer_internal_sync() && parallel.size() <= 1)
+	{
+		return cudaPeekAtLastError();
+	}
 #ifdef HALO_COMMS_EVENT_SYNC
 	// Event-based stream sync path, enabled with -DHALO_COMMS_EVENT_SYNC.
 	static thread_local cudaEvent_t halo_sync_event = nullptr;

@@ -2,13 +2,31 @@
 #define LATTICE_LOOP_HPP
 
 #include <cuda/atomic>
+#include <type_traits>
 
 using namespace LATfield2;
 
+template <typename ForEachFunct>
+__device__ inline auto call_lattice_functor(ForEachFunct &funct, Field<Real> **fields, Site *sites, int nfields,
+                                            double *params, double *output_site, void **vparams, int step)
+    -> decltype(funct(fields, sites, nfields, params, output_site, vparams, step), void())
+{
+    funct(fields, sites, nfields, params, output_site, vparams, step);
+}
+
+template <typename ForEachFunct>
+__device__ inline auto call_lattice_functor(ForEachFunct &funct, Field<Real> **fields, Site *sites, int nfields,
+                                            double *params, double *output_site, void **vparams, int step)
+    -> decltype(funct(fields, sites, nfields, params, output_site, vparams), void())
+{
+    (void) step;
+    funct(fields, sites, nfields, params, output_site, vparams);
+}
+
 // generic loop for lattice
 template <typename ForEachFunct, int noutput = 0>
-__global__ void lattice_for_each(ForEachFunct funct, int numpts, Field<Real> ** fields, int nfields, double * params,
-                                double * output, int * reduce_type,void ** vparams = nullptr, int intoHalo = 0)
+__global__ void lattice_for_each(ForEachFunct funct, const int numpts, Field<Real> ** fields, const int nfields, double * params,
+                                double * output, int * reduce_type,void ** vparams = nullptr, const int intoHalo = 0, const int step = -1)
 {
     int coord1 = blockIdx.x;
     int coord2 = blockIdx.y;
@@ -56,7 +74,7 @@ __global__ void lattice_for_each(ForEachFunct funct, int numpts, Field<Real> ** 
                             + coord1*fields[i]->lattice().jump(1)
                             + coord2*fields[i]->lattice().jump(2));
         }
-        funct(fields, sites, nfields, params, output_site, vparams);
+        call_lattice_functor(funct, fields, sites, nfields, params, output_site, vparams, step);
 
         if constexpr (noutput > 0)
         {
