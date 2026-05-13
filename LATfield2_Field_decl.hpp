@@ -365,7 +365,8 @@ class Field
 
 	    void saveHDF5_coarseGrain3D(string filename,string dataset_name ,int ratio);
 	    void saveHDF5_coarseGrain3D(string filename,int ratio){this->saveHDF5_coarseGrain3D(filename,"data",ratio);}
-
+		void saveSliceHDF5_coarseGrain2D(string filename, string dataset_name, int xcoord, int thickness = 1, int ratio = 1);
+		void saveSliceHDF5_coarseGrain2D(string filename, int xcoord, int thickness = 1, int ratio = 1)  { this->saveSliceHDF5_coarseGrain2D(filename, "data", xcoord, thickness, ratio); }
 
         /*!
          Save a slice perpendicular to the first coordinate, at xcoord. To be able to use this method the flag HDF5 need to be set at compilation (-DHDF5).
@@ -3413,6 +3414,94 @@ void  Field<FieldType>::saveSliceHDF5(string filename, string dataset_name,int x
     COUT<<"aborting...."<<endl;
 #endif
 
+}
+
+// ************ Modification ************
+// Created for use with asevolution and creation of coarse grained animations
+// -- Øyvind Christiansen
+template <class FieldType>
+void Field<FieldType>::saveSliceHDF5_coarseGrain2D(string filename, string dataset_name, int xcoord, int thickness, int ratio)
+{
+// First coarsen, then call saveSliceHDF5
+#ifdef HDF5
+	Lattice slat;
+	Field<FieldType> sfield;
+
+	int dim = lattice_->dim();
+	long localsize[dim];
+
+	int sSize[dim];
+	int slocalsize[dim];
+
+	long blocksize = array_size_ * components_;
+	long halo = lattice_->halo();
+
+	int number_cg = ratio * ratio * ratio;
+	long index_cg[number_cg];
+
+	long index;
+	long sindex;
+
+	for (int i = 0; i < dim; i++)
+	{
+		if (lattice_->sizeLocal(i) % ratio != 0)
+		{
+			cout << "process " << parallel.rank() << " have wrong ratio aborting coarse grain write" << endl;
+			return;
+		}
+		sSize[i] = (lattice_->size(i)) / ratio;
+		localsize[i] = lattice_->sizeLocal(i);
+		slocalsize[i] = lattice_->sizeLocal(i) / ratio;
+	}
+
+	for (int k = 0; k < ratio; k++)
+	{
+		for (int j = 0; j < ratio; j++)
+		{
+			for (int i = 0; i < 1; i++)
+			{
+				index_cg[i + ratio * (j + ratio * k)] = ((long)i + (localsize[0] + 2l * halo) * ((long)j + (localsize[1] + 2l * halo) * (long)k)) * blocksize;
+			}
+		}
+	}
+	slat.initialize(dim, sSize, 0);
+	sfield.initialize(slat, rows_, cols_, symmetry_);
+	sfield.alloc();
+
+	index = halo + (localsize[0] + 2l * halo) * (halo + (localsize[1] + 2l * halo) * halo);
+	sindex = 0;
+
+	for (int k = 0; k < slocalsize[2]; k++)
+	{
+		for (int j = 0; j < slocalsize[1]; j++)
+		{
+			for (int i = 0; i < slocalsize[0]; i++)
+			{
+				for (int i_block = 0; i_block < blocksize; i_block++)
+					sfield.data()[sindex * blocksize + i_block] = data_[index * blocksize + i_block];
+				for (int s = 1; s < number_cg; s++)
+				{
+					for (int i_block = 0; i_block < blocksize; i_block++)
+						sfield.data()[sindex * blocksize + i_block] += data_[index * blocksize + index_cg[s] + i_block];
+				}
+				for (int i_block = 0; i_block < blocksize; i_block++)
+					sfield.data()[sindex * blocksize + i_block] /= number_cg;
+
+				index += ratio;
+				sindex += 1;
+			}
+			index += (localsize[0] + (2l * halo)) * ratio - localsize[0];
+		}
+		index += ((localsize[1] + (2 * halo)) * ratio - localsize[1]) * (localsize[0] + (2 * halo));
+	}
+
+	sfield.saveSliceHDF5(filename, dataset_name, xcoord, thickness); // minimal modification :)
+	sfield.dealloc();
+#else
+	COUT << "LATfield2d must be compiled with HDF5 (flag HDF5 turn on!!)" << endl;
+	COUT << "to be able to use hdf5 data format!!!)" << endl;
+	COUT << "aborting.... " << endl;
+#endif
 }
 
 template <class FieldType>
