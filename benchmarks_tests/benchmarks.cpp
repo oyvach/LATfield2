@@ -20,6 +20,7 @@ int main(int argc, char **argv)
     int BoxSize=64;
     int runs=3;
     double maxTime=300;
+    bool use_cuda_aware_mpi = false;
     string str_filename;
     
     
@@ -42,6 +43,9 @@ int main(int argc, char **argv)
                 break;
             case 'o':
                 str_filename = argv[++i];
+                break;
+            case 'a':
+                use_cuda_aware_mpi = atoi(argv[++i]) != 0;
                 break;
 		}
 	}
@@ -117,6 +121,10 @@ int main(int argc, char **argv)
         
         planImag.initialize(&phiImag,&phiKImag);
         planReal.initialize(&phiReal,&phiKReal);
+        if (use_cuda_aware_mpi)
+        {
+            planReal.setExecutionMode(FFT_EXECUTION_CUDA_AWARE_MPI);
+        }
         
         for(x.first();x.test();x.next())
         {

@@ -1309,6 +1309,11 @@ template<class Type> void Parallel2d::send(Type* array, int len, int to)
 	MPI_Send( array, len*sizeof(Type), MPI_BYTE, to, 0, world_comm_ );
 }
 
+template<class Type> void Parallel2d::isend(Type* array, int len, int to, MPI_Request * request)
+{
+	MPI_Isend( array, len*sizeof(Type), MPI_BYTE, to, 0, world_comm_, request );
+}
+
 template<class Type> void Parallel2d::send_dim0(Type& message, int to)
 {
     MPI_Send( &message, sizeof(Type), MPI_BYTE, to, 0, dim0_comm_[grid_rank_[1]] );
@@ -1317,6 +1322,11 @@ template<class Type> void Parallel2d::send_dim0(Type& message, int to)
 template<class Type> void Parallel2d::send_dim0(Type* array, int len, int to)
 {
     MPI_Send( array, len*sizeof(Type), MPI_BYTE, to, 0, dim0_comm_[grid_rank_[1]] );
+}
+
+template<class Type> void Parallel2d::isend_dim0(Type* array, int len, int to, MPI_Request * request)
+{
+    MPI_Isend( array, len*sizeof(Type), MPI_BYTE, to, 0, dim0_comm_[grid_rank_[1]], request );
 }
 
 template<class Type> void Parallel2d::send_dim1(Type& message, int to)
@@ -1329,6 +1339,12 @@ template<class Type> void Parallel2d::send_dim1(Type* array, int len, int to)
 {
 
     MPI_Send( array, len*sizeof(Type), MPI_BYTE, to, 0, dim1_comm_[grid_rank_[0]] );
+}
+
+template<class Type> void Parallel2d::isend_dim1(Type* array, int len, int to, MPI_Request * request)
+{
+
+    MPI_Isend( array, len*sizeof(Type), MPI_BYTE, to, 0, dim1_comm_[grid_rank_[0]], request );
 }
 
 
@@ -1347,6 +1363,11 @@ template<class Type> void Parallel2d::receive(Type* array, int len, int from)
 	MPI_Recv( array, len*sizeof(Type), MPI_BYTE, from, 0, world_comm_, &status);
 }
 
+template<class Type> void Parallel2d::ireceive(Type* array, int len, int from, MPI_Request * request)
+{
+	MPI_Irecv( array, len*sizeof(Type), MPI_BYTE, from, 0, world_comm_, request);
+}
+
 template<class Type> void Parallel2d::receive_dim0(Type& message, int from)
 {
 
@@ -1361,6 +1382,12 @@ template<class Type> void Parallel2d::receive_dim0(Type* array, int len, int fro
     MPI_Recv( array, len*sizeof(Type), MPI_BYTE, from, 0, dim0_comm_[grid_rank_[1]], &status);
 }
 
+template<class Type> void Parallel2d::ireceive_dim0(Type* array, int len, int from, MPI_Request * request)
+{
+
+    MPI_Irecv( array, len*sizeof(Type), MPI_BYTE, from, 0, dim0_comm_[grid_rank_[1]], request);
+}
+
 template<class Type> void Parallel2d::receive_dim1(Type& message, int from)
 {
 
@@ -1373,6 +1400,12 @@ template<class Type> void Parallel2d::receive_dim1(Type* array, int len, int fro
 
     MPI_Status  status;
     MPI_Recv( array, len*sizeof(Type), MPI_BYTE, from, 0, dim1_comm_[grid_rank_[0]], &status);
+}
+
+template<class Type> void Parallel2d::ireceive_dim1(Type* array, int len, int from, MPI_Request * request)
+{
+
+    MPI_Irecv( array, len*sizeof(Type), MPI_BYTE, from, 0, dim1_comm_[grid_rank_[0]], request);
 }
 
 

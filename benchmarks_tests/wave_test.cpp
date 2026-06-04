@@ -20,6 +20,7 @@ int main(int argc, char **argv)
     int khalo =0;
     int dim = 3;
     int comp = 1;
+    bool use_cuda_aware_mpi = false;
     int i,j,l,rnk;
     double val_re, val_im;
     int count = 0;
@@ -38,6 +39,9 @@ int main(int argc, char **argv)
             case 'b':
                 BoxSize = atoi(argv[++i]);
                 break;
+            case 'a':
+                use_cuda_aware_mpi = atoi(argv[++i]) != 0;
+                break;
 		}
 	}
 
@@ -55,6 +59,7 @@ int main(int argc, char **argv)
     Field<Imag> phiK;
     phiK.initialize(latK,comp);
     PlanFFT<Imag> planPhi(&phi,&phiK);
+    if (use_cuda_aware_mpi) planPhi.setExecutionMode(FFT_EXECUTION_CUDA_AWARE_MPI);
 
 	double cpu_time_start;
 	double cpu_time_total = 0.;
@@ -171,4 +176,3 @@ int main(int argc, char **argv)
 
     exit(count);
 }
-

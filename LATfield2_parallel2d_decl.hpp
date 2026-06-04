@@ -19,6 +19,14 @@
 #include "mpi.h"
 #define COUT if(parallel.isRoot())cout
 
+#ifdef FFT3D
+namespace LATfield2
+{
+  #include "LATfield2_PlanFFT.hpp"
+  extern  temporaryMemFFT tempMemory;
+}
+#endif
+
 
 /*! \class Parallel2d
  \brief LATfield2d underliying class for paralleization
@@ -62,6 +70,15 @@ class Parallel2d{
    \param proc_size1 : size of the second dimension of the MPI process grid.
    */
   void initialize(int proc_size0, int proc_size1);
+
+  void finalize()
+  {
+#ifdef FFT3D
+    LATfield2::tempMemory.clear();
+#endif
+    if(!neverFinalizeMPI) MPI_Finalize();
+    neverFinalizeMPI = true;
+  }
 
   //ABORT AND BARRIER===============================
 
@@ -265,6 +282,7 @@ class Parallel2d{
    \param to    : rank of the receiver. (in lat_world_comm)
    */
   template<class Type> void send(Type* array, int len, int to);
+  template<class Type> void isend(Type* array, int len, int to, MPI_Request * request);
   /*!
    MPI send method on the compute processes. The method calls MPI_Send in the directional communicator associated with the process caller. (direction=0)
    \param message : variable to send.
@@ -278,6 +296,7 @@ class Parallel2d{
    \param to    : rank of the receiver. (grid_rank_[0])
    */
   template<class Type> void send_dim0(Type* array, int len, int to);
+  template<class Type> void isend_dim0(Type* array, int len, int to, MPI_Request * request);
   /*!
    MPI send method on the compute processes. The method calls MPI_Send in the directional communicator associated with the process caller. (direction=1)
    \param message : variable to send.
@@ -291,6 +310,7 @@ class Parallel2d{
    \param to    : rank of the receiver. (grid_rank_[1])
    */
   template<class Type> void send_dim1(Type* array, int len, int to);
+  template<class Type> void isend_dim1(Type* array, int len, int to, MPI_Request * request);
 
 
   /*!
@@ -306,6 +326,7 @@ class Parallel2d{
    \param from    : rank of the sender. (in lat_world_comm_)
    */
   template<class Type> void receive(Type* array, int len, int from);
+  template<class Type> void ireceive(Type* array, int len, int from, MPI_Request * request);
   /*!
    MPI receive method on the compute processes. The method call MPI_Recv in the directional communicator associated with the process caller. (direction=0)
    \param message : variable which will be assigned to the receive message.
@@ -319,6 +340,7 @@ class Parallel2d{
    \param from    : rank of the sender. (grid_rank_[0])
    */
   template<class Type> void receive_dim0(Type* array, int len, int from);
+  template<class Type> void ireceive_dim0(Type* array, int len, int from, MPI_Request * request);
   /*!
    MPI receive method on the compute processes. The method call MPI_Recv in the directional communicator associated with the process caller. (direction=1)
    \param message : variable which will be assigned to the receive message.
@@ -332,6 +354,7 @@ class Parallel2d{
    \param from    : rank of the sender. (grid_rank_[1])
    */
   template<class Type> void receive_dim1(Type* array, int len, int from);
+  template<class Type> void ireceive_dim1(Type* array, int len, int from, MPI_Request * request);
 
   /*!
    Method to send a message through dim0 of the process grid. Processes of grid_rank_[0]=N will send the message to the grid_rank_[0]=N+1, with a torus topology. Therefore each process will send and receive data.

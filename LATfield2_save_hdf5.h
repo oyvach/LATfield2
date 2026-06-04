@@ -1,3 +1,4 @@
+
 /*! \file LATfield2_save_hdf5.h
  \brief LATfield2_save_hdf5.h contains the definition of the function used for hdf5 i/o.
  \author David Daverio
@@ -13,18 +14,16 @@ extern "C"{
    int save_hdf5_externC(char *data,long file_offset[2],int *size,int * sizeLocal,int halo, int lat_dim,int comp,hid_t array_type,int array_size,string  filename_str, string dataset_name_str)
    {
 
-	   hid_t file_id, plist_id,filespace,memspace,dset_id,dtype_id,dtbase_id,root_id;
-	   hsize_t * components = nullptr; // Initialize to nullptr
+	   hid_t file_id, plist_id,filespace,memspace,dset_id,dtype_id,dtbase_id;
+	   hsize_t * components;
 
 	   char * filename;
 	   filename = (char*)malloc((filename_str.size()+1)*sizeof(char));
-       //for(int i = 0;i<filename_str.size();i++)filename[i]=filename_str[i];
-	   strcpy(filename,filename_str.c_str());
-       filename[filename_str.size()] = '\0';
+     for(int i = 0;i<filename_str.size();i++)filename[i]=filename_str[i];
+     filename[filename_str.size()] = '\0';
 
-	   char  dataset_name[512];
-	//    for(int i = 0;i<filename_str.size();i++)dataset_name[i]=dataset_name_str[i];
-	   strcpy(dataset_name,dataset_name_str.c_str());
+	   char  dataset_name[128];
+	   for(int i = 0;i<filename_str.size();i++)dataset_name[i]=dataset_name_str[i];
 	   dataset_name[dataset_name_str.size()] = '\0';
 
 	   herr_t status;
@@ -89,6 +88,12 @@ extern "C"{
 		   status = H5Tset_order(dtbase_id, DATA_ORDER);
 		   dtype_id = H5Tarray_create(dtbase_id,2,components);
 	   }
+	   // check status
+	   if (status<0)
+	   {
+		   cout<<"Error during HDF5 datatype creation process "<<endl;
+		   parallel.abortForce();
+	   }
 	   ///////////////////////////////
 	   ///////////////////////////////
 
@@ -134,13 +139,6 @@ extern "C"{
 	   H5Pclose(plist_id);
 	   H5Fclose(file_id);
 	   free(filename);
-
-	   delete[] sizeGlobal;
-	   delete[] localSize;
-	   delete[] offset;
-	   delete[] offsetf;
-	   delete[] count;
-	   delete[] components;
 
 	   return 1;
 
@@ -190,7 +188,7 @@ extern "C"{
 
 			   file_id = H5Fopen(filename,H5F_ACC_RDWR,plist_id);
 			   H5Pclose(plist_id);
-			   root_id = H5Gopen(file_id,"/",H5P_DEFAULT);
+			   hid_t root_id = H5Gopen(file_id,"/",H5P_DEFAULT);
 			   dset_id = H5Dopen(root_id, dataset_name, H5P_DEFAULT);
 			   filespace = H5Dget_space(dset_id);
 			   dtype_id = H5Dget_type(dset_id);
@@ -218,25 +216,10 @@ extern "C"{
 
 	   }
 
-	   delete[] sizeGlobal;
-	   delete[] localSize;
-	   delete[] offset;
-	   delete[] offsetf;
-	   delete[] count;
-	   delete[] components;
 	   free(filename);
 	   return 1;
 #endif
 
-	   // Cleanup in case of error or unexpected path
-	   delete[] sizeGlobal;
-	   delete[] localSize;
-	   delete[] offset;
-	   delete[] offsetf;
-	   delete[] count;
-	   delete[] components;
-	   // filename might also need freeing here if this path is reachable after its allocation
-	   // and before its usual free points. For now, focusing on the reported leaks.
 	   return -1;
 
 
@@ -248,18 +231,16 @@ extern "C"{
 
 
 
-	    hid_t file_id, plist_id, plistxfer_id,filespace,memspace,dset_id,dtype_id,dtbase_id,group_id,root_id;
+	    hid_t file_id, plist_id, plistxfer_id,filespace,memspace,dset_id,dtype_id,root_id;
 
 
 		char * filename;
 		filename = (char*)malloc((filename_str.size()+1)*sizeof(char));
-		// for(int i = 0;i<filename_str.size();i++)filename[i]=filename_str[i];
-		strncpy(filename,filename_str.c_str(),filename_str.size());
+		for(int i = 0;i<filename_str.size();i++)filename[i]=filename_str[i];
 		filename[filename_str.size()] = '\0';
 
-		char  dataset_name[512];
-		// for(int i = 0;i<filename_str.size();i++)dataset_name[i]=dataset_name_str[i];
-		strncpy(dataset_name,dataset_name_str.c_str(),dataset_name_str.size());
+		char  dataset_name[128];
+		for(int i = 0;i<filename_str.size();i++)dataset_name[i]=dataset_name_str[i];
 		dataset_name[dataset_name_str.size()] = '\0';
 
 		herr_t status;
@@ -319,6 +300,16 @@ extern "C"{
 		plistxfer_id = H5Pcreate(H5P_DATASET_XFER);
 		H5Pset_dxpl_mpio(plistxfer_id, H5FD_MPIO_COLLECTIVE);
 		status = H5Dread(dset_id, dtype_id, memspace, filespace, plistxfer_id, data);
+
+		// check status
+		if (status<0)
+		{
+			cout<<"Error during HDF5 parallel read process "<<parallel.rank()
+				<<", file "<<filename_str
+				<<", dataset "<<dataset_name_str
+				<<endl;
+			parallel.abortForce();
+		}
 
 		H5Dclose(dset_id);
 		H5Gclose(root_id);
