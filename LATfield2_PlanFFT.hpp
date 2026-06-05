@@ -18,6 +18,7 @@
  		~temporaryMemFFT();
  		temporaryMemFFT(long size);
 
+		void setDeviceWorkspaceManaged(bool managed);
  		int setTemp(long size);
 		int reserveDeviceWorkspaceBytes(size_t bytes, const char* context = nullptr);
     	void clear();
@@ -62,6 +63,7 @@
 #endif
  		long allocated_; //number of variable stored (bit = allocated*sizeof(fftw(f)_complex))
 		size_t device_allocated_; //number of complex values in each logical device buffer
+		bool device_workspace_managed_;
 
 		size_t deviceComplexBytes();
 		int reserveDeviceComplexCapacity(size_t capacity, const char* context);
@@ -88,6 +90,7 @@ temporaryMemFFT::temporaryMemFFT()
 	temp5_=nullptr;
 	allocated_=0;
 	device_allocated_=0;
+	device_workspace_managed_=false;
 }
 temporaryMemFFT::~temporaryMemFFT()
 {
@@ -103,6 +106,7 @@ temporaryMemFFT::temporaryMemFFT(long size)
 	temp5_=nullptr;
 	allocated_=0;
 	device_allocated_=0;
+	device_workspace_managed_=false;
 	setTemp(size);
 }
 
@@ -159,6 +163,22 @@ void temporaryMemFFT::warnDeviceWorkspaceGrowth(size_t old_bytes, size_t new_byt
 	}
 }
 
+void temporaryMemFFT::setDeviceWorkspaceManaged(bool managed)
+{
+	if (!managed || device_workspace_managed_) return;
+
+	size_t old_capacity = device_allocated_;
+	device_workspace_managed_ = true;
+
+	if (device_block_ == nullptr) return;
+
+	cudaFree(device_block_);
+	device_block_ = nullptr;
+	device_allocated_ = 0;
+	updateDeviceBufferPointers();
+	reserveDeviceComplexCapacity(old_capacity, "temporaryMemFFT::setDeviceWorkspaceManaged");
+}
+
 int temporaryMemFFT::reserveDeviceComplexCapacity(size_t capacity, const char* context)
 {
 	if (capacity <= device_allocated_) return 1;
@@ -168,11 +188,14 @@ int temporaryMemFFT::reserveDeviceComplexCapacity(size_t capacity, const char* c
 
 	if (device_block_ != nullptr) cudaFree(device_block_);
 
-	auto success = cudaMalloc((void **)&device_block_, new_bytes);
+	auto success = device_workspace_managed_
+		? cudaMallocManaged((void **)&device_block_, new_bytes)
+		: cudaMalloc((void **)&device_block_, new_bytes);
 
 	if (success != cudaSuccess)
 	{
-		std::cerr << "cudaMalloc failed: " << cudaGetErrorString(success) << std::endl;
+		std::cerr << (device_workspace_managed_ ? "cudaMallocManaged" : "cudaMalloc")
+		          << " failed: " << cudaGetErrorString(success) << std::endl;
 		device_block_ = nullptr;
 		device_allocated_ = 0;
 		updateDeviceBufferPointers();
@@ -245,6 +268,7 @@ void temporaryMemFFT::clear()
 		if(device_block_!=nullptr)cudaFree(device_block_);
 		allocated_ = 0;
 		device_allocated_ = 0;
+		device_workspace_managed_ = false;
 		temp1_=nullptr;
 		temp2_=nullptr;
 		device_block_=nullptr;

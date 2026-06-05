@@ -820,18 +820,8 @@ void Field<FieldType>::alloc(long size, int alloc_type)
 #endif
 		}
 
-		if (alloc_type == managed)
-		{
-			success = cudaMemPrefetchAsync(data_, data_memSize_ * sizeof(FieldType), 0);
-			if (success != cudaSuccess)
-			{
-				cout << "LATField2d::Field::alloc(long size, int alloc_type)  :process " << parallel.rank() << " cannot prefetch the managed memory to CPU." << endl;
-				throw std::runtime_error("CUDA memory prefetch failed");
-			}
-			cudaMemAdvise(data_, data_memSize_ * sizeof(FieldType), cudaMemAdviseSetPreferredLocation, 0);
-			cudaMemAdvise(data_, data_memSize_ * sizeof(FieldType), cudaMemAdviseSetAccessedBy, 0);
-			cudaDeviceSynchronize();
-		}
+		// Managed fields intentionally do not set a preferred device location here.
+		// This leaves oversubscription and NUMA-backed migration available to CUDA.
 	}
 	else
 	{
