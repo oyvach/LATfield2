@@ -173,6 +173,7 @@ private:
   bool status_;
   bool type_;
   int mem_type_;
+  bool managed_;
   bool alignment_even_;
   int execution_mode_;
   bool cuda_aware_mpi_enabled_;
@@ -447,10 +448,11 @@ void PlanFFT<compType>::resolveCudaAwareMPI()
 
 
 template<class compType>
-PlanFFT<compType>::PlanFFT(Field<compType>*  rfield,Field<compType>* kfield,const int mem_type , const bool managed) : PlanFFT()
+PlanFFT<compType>::PlanFFT(Field<compType>* rfield, Field<compType>* kfield,const int mem_type , const bool managed) : PlanFFT()
 {
+  managed_ = managed;
   status_ = false;
-  initialize(rfield,kfield,mem_type);
+  initialize(rfield, kfield, mem_type);
 }
 
 template<class compType>
@@ -576,6 +578,7 @@ void PlanFFT<compType>::initialize(Field<compType>*  rfield,Field<compType>*  kf
 template<class compType>
 PlanFFT<compType>::PlanFFT(Field<float>* rfield, Field<compType>*  kfield,const int mem_type, const bool managed )  : PlanFFT()
 {
+  managed_ = managed;
   status_ = false;
   initialize(rfield,kfield,mem_type);
 }
@@ -821,6 +824,7 @@ void PlanFFT<compType>::initialize(Field<float>*  rfield,Field<compType>*   kfie
 template<class compType>
 PlanFFT<compType>::PlanFFT(Field<compType>*  rfield,Field<compType>* kfield,const int mem_type, const bool managed)
 {
+  managed_ = managed;
 	status_ = false;
 	initialize(rfield,kfield,mem_type);
 }
@@ -938,6 +942,7 @@ void PlanFFT<compType>::initialize(Field<compType>*  rfield,Field<compType>*  kf
 template<class compType>
 PlanFFT<compType>::PlanFFT(Field<double>* rfield, Field<compType>*  kfield,const int mem_type, const bool managed )
 {
+  managed_ = managed;
   status_ = false;
   initialize(rfield,kfield,mem_type);
 }

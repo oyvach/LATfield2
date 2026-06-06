@@ -820,19 +820,19 @@ void Field<FieldType>::alloc(long size, int alloc_type)
 			std::cerr << "LATField2d::Field::alloc(long size, int alloc_type)  :proc#" << parallel.rank() << " allocated field data array with alignment: " << alignment << " and alloc_type: " << alloc_type << "; memsize: " << data_memSize_ << "x" << sizeof(FieldType) << std::endl;
 #endif
 		}
-
-		if (alloc_type == managed)
-		{
-			success = cudaMemPrefetchAsync(data_, data_memSize_ * sizeof(FieldType), 0);
-			if (success != cudaSuccess)
-			{
-				cout << "LATField2d::Field::alloc(long size, int alloc_type)  :process " << parallel.rank() << " cannot prefetch the managed memory to CPU." << endl;
-				throw std::runtime_error("CUDA memory prefetch failed");
-			}
-			cudaMemAdvise(data_, data_memSize_ * sizeof(FieldType), cudaMemAdviseSetPreferredLocation, 0);
-			cudaMemAdvise(data_, data_memSize_ * sizeof(FieldType), cudaMemAdviseSetAccessedBy, 0);
-			cudaDeviceSynchronize();
-		}
+		// this is turned off for demanding device RAM mavan runs
+		// if (alloc_type == managed)
+		// {
+		// 	success = cudaMemPrefetchAsync(data_, data_memSize_ * sizeof(FieldType), 0);
+		// 	if (success != cudaSuccess)
+		// 	{
+		// 		cout << "LATField2d::Field::alloc(long size, int alloc_type)  :process " << parallel.rank() << " cannot prefetch the managed memory to CPU." << endl;
+		// 		throw std::runtime_error("CUDA memory prefetch failed");
+		// 	}
+		// 	cudaMemAdvise(data_, data_memSize_ * sizeof(FieldType), cudaMemAdviseSetPreferredLocation, 0);
+		// 	cudaMemAdvise(data_, data_memSize_ * sizeof(FieldType), cudaMemAdviseSetAccessedBy, 0);
+		// 	cudaDeviceSynchronize();
+		// }
 	}
 	else
 	{

@@ -598,9 +598,18 @@ void perfParticles<part, part_info>::initialize(part_info part_global_info, Latt
         
         extra_buffer_[i].sorted = true;
 
-        extra_buffer_[i].p = (Real *) malloc(extra_buffer_[i].capacity * 3 * sizeof(Real));
-        extra_buffer_[i].q = (Real *) malloc(extra_buffer_[i].capacity * 3 * sizeof(Real));
-        extra_buffer_[i].other = (long *) malloc(extra_buffer_[i].capacity * sizeof(long));
+        if (!managed_runtime_)
+        {
+            extra_buffer_[i].p = (Real *) malloc(extra_buffer_[i].capacity * 3 * sizeof(Real));
+            extra_buffer_[i].q = (Real *) malloc(extra_buffer_[i].capacity * 3 * sizeof(Real));
+            extra_buffer_[i].other = (long *) malloc(extra_buffer_[i].capacity * sizeof(long));
+        }
+        else
+        {
+            cudaMallocManaged(&extra_buffer_[i].p, extra_buffer_[i].capacity * 3 * sizeof(Real));
+            cudaMallocManaged(&extra_buffer_[i].q, extra_buffer_[i].capacity * 3 * sizeof(Real));
+            cudaMallocManaged(&extra_buffer_[i].other, extra_buffer_[i].capacity * sizeof(long));
+        }
     }
 
     // update device mempool release threshold
