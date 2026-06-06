@@ -101,7 +101,7 @@ public:
    \param kfield : fourier space field
    \param mem_type : memory type (FFT_OUT_OF_PLACE or FFT_IN_PLACE). In place mean that both fourier and real space field point to the same data array.
    */
-  void initialize(Field<compType>*  rfield,Field<compType>*   kfield,const int mem_type = FFT_OUT_OF_PLACE, const bool managed = false);
+  void initialize(Field<compType>*  rfield,Field<compType>*   kfield,const int mem_type = FFT_OUT_OF_PLACE);
 
   /*!
    Constructor with initialization for real to complex tranform.
@@ -118,7 +118,7 @@ public:
    \param kfield : fourier space field
    \param mem_type : memory type (FFT_OUT_OF_PLACE or FFT_IN_PLACE). In place mean that both fourier and real space field point to the same data array.
    */
-  void initialize(Field<double>*  rfield,Field<compType>*   kfield,const int mem_type = FFT_OUT_OF_PLACE, const bool managed = false);
+  void initialize(Field<double>*  rfield,Field<compType>*   kfield,const int mem_type = FFT_OUT_OF_PLACE);
 
 
 
@@ -127,11 +127,11 @@ public:
 #ifdef SINGLE
 
   PlanFFT(Field<compType>* rfield, Field<compType>*  kfield,const int mem_type = FFT_OUT_OF_PLACE, const bool managed = false);
-  void initialize(Field<compType>*  rfield,Field<compType>*   kfield,const int mem_type = FFT_OUT_OF_PLACE, const bool managed = false);
+  void initialize(Field<compType>*  rfield,Field<compType>*   kfield,const int mem_type = FFT_OUT_OF_PLACE);
 
 
   PlanFFT(Field<float>* rfield, Field<compType>*  kfield,const int mem_type = FFT_OUT_OF_PLACE, const bool managed = false);
-  void initialize(Field<float>*  rfield,Field<compType>*   kfield,const int mem_type = FFT_OUT_OF_PLACE, const bool managed = false);
+  void initialize(Field<float>*  rfield,Field<compType>*   kfield,const int mem_type = FFT_OUT_OF_PLACE);
 
 
 #endif
@@ -447,18 +447,17 @@ void PlanFFT<compType>::resolveCudaAwareMPI()
 
 
 template<class compType>
-PlanFFT<compType>::PlanFFT(Field<compType>*  rfield,Field<compType>* kfield,const int mem_type, const bool managed) : PlanFFT()
+PlanFFT<compType>::PlanFFT(Field<compType>*  rfield,Field<compType>* kfield,const int mem_type , const bool managed) : PlanFFT()
 {
   status_ = false;
-  initialize(rfield,kfield,mem_type,managed);
+  initialize(rfield,kfield,mem_type);
 }
 
 template<class compType>
-void PlanFFT<compType>::initialize(Field<compType>*  rfield,Field<compType>*  kfield,const int mem_type, const bool managed)
+void PlanFFT<compType>::initialize(Field<compType>*  rfield,Field<compType>*  kfield,const int mem_type )
 {
   type_ = C2C;
   mem_type_=mem_type;
-  if (managed) tempMemory.setDeviceWorkspaceManaged(true);
 
   //general variable
 
@@ -530,29 +529,19 @@ void PlanFFT<compType>::initialize(Field<compType>*  rfield,Field<compType>*  kf
   	{
   		if(rfield_size>=kfield_size)
   		{
-  			if (managed) rfield->alloc(rfield_size, Field<compType>::managed);
-  			else rfield->alloc();
+  			rfield->alloc();
   			kfield->data() = (Imag*)rfield->data();
   		}
   		else
   		{
-  			if (managed) kfield->alloc(kfield_size, Field<compType>::managed);
-  			else kfield->alloc();
+  			kfield->alloc();
   			rfield->data() = (Imag*)kfield->data();
   		}
   	}
   	if(mem_type_ == FFT_OUT_OF_PLACE)
   	{
-  		if (managed)
-  		{
-  			rfield->alloc(rfield_size, Field<compType>::managed);
-  			kfield->alloc(kfield_size, Field<compType>::managed);
-  		}
-  		else
-  		{
-  			rfield->alloc();
-  			kfield->alloc();
-  		}
+  		rfield->alloc();
+  		kfield->alloc();
   	}
 
   	rData_ = (float*)rfield->data(); //to be sure that rData is instantiate !
@@ -588,15 +577,14 @@ template<class compType>
 PlanFFT<compType>::PlanFFT(Field<float>* rfield, Field<compType>*  kfield,const int mem_type, const bool managed )  : PlanFFT()
 {
   status_ = false;
-  initialize(rfield,kfield,mem_type,managed);
+  initialize(rfield,kfield,mem_type);
 }
 
 template<class compType>
-void PlanFFT<compType>::initialize(Field<float>*  rfield,Field<compType>*   kfield, const int mem_type, const bool managed )
+void PlanFFT<compType>::initialize(Field<float>*  rfield,Field<compType>*   kfield, const int mem_type )
 {
   type_ = R2C;
   mem_type_=mem_type;
-  if (managed) tempMemory.setDeviceWorkspaceManaged(true);
 
   //general variable
   if(rfield->components() != kfield->components())
@@ -767,23 +755,19 @@ void PlanFFT<compType>::initialize(Field<float>*  rfield,Field<compType>*   kfie
   {
     if(rfield_size>kfield_size*2)
     {
-      if (managed) rfield->alloc(rfield_size, Field<float>::managed);
-      else rfield->alloc();
+      rfield->alloc();
       kfield->data() = (Imag *)rfield->data();
     }
     else
     {
-      if (managed) kfield->alloc(kfield_size, Field<compType>::managed);
-      else kfield->alloc();
+      kfield->alloc();
       rfield->data() = (float *)kfield->data();
     }
   }
   if(mem_type_ == FFT_OUT_OF_PLACE)
   {
-    if (managed) rfield->alloc(rfield_size, Field<float>::managed);
-    else rfield->alloc(rfield_size);
-    if (managed) kfield->alloc(kfield_size, Field<compType>::managed);
-    else kfield->alloc(kfield_size);
+    rfield->alloc(rfield_size, Field<float>::managed);
+    kfield->alloc(kfield_size);
   }
 
 
@@ -838,15 +822,14 @@ template<class compType>
 PlanFFT<compType>::PlanFFT(Field<compType>*  rfield,Field<compType>* kfield,const int mem_type, const bool managed)
 {
 	status_ = false;
-	initialize(rfield,kfield,mem_type,managed);
+	initialize(rfield,kfield,mem_type);
 }
 
 template<class compType>
-void PlanFFT<compType>::initialize(Field<compType>*  rfield,Field<compType>*  kfield,const int mem_type, const bool managed)
+void PlanFFT<compType>::initialize(Field<compType>*  rfield,Field<compType>*  kfield,const int mem_type )
 {
   type_ = C2C;
   mem_type_=mem_type;
-  if (managed) tempMemory.setDeviceWorkspaceManaged(true);
 
   //general variable
 
@@ -927,29 +910,19 @@ void PlanFFT<compType>::initialize(Field<compType>*  rfield,Field<compType>*  kf
   	{
   		if(rfield_size>=kfield_size)
   		{
-  			if (managed) rfield->alloc(rfield_size, Field<compType>::managed);
-  			else rfield->alloc();
+  			rfield->alloc();
   			kfield->data() = (Imag*)rfield->data();
   		}
   		else
   		{
-  			if (managed) kfield->alloc(kfield_size, Field<compType>::managed);
-  			else kfield->alloc();
+  			kfield->alloc();
   			rfield->data() = (Imag*)kfield->data();
   		}
   	}
   	if(mem_type_ == FFT_OUT_OF_PLACE)
   	{
-  		if (managed)
-  		{
-  			rfield->alloc(rfield_size, Field<compType>::managed);
-  			kfield->alloc(kfield_size, Field<compType>::managed);
-  		}
-  		else
-  		{
-  			rfield->alloc();
-  			kfield->alloc();
-  		}
+  		rfield->alloc();
+  		kfield->alloc();
   	}
 
   	//Pointer to data
@@ -966,17 +939,16 @@ template<class compType>
 PlanFFT<compType>::PlanFFT(Field<double>* rfield, Field<compType>*  kfield,const int mem_type, const bool managed )
 {
   status_ = false;
-  initialize(rfield,kfield,mem_type,managed);
+  initialize(rfield,kfield,mem_type);
 }
 
 
 
 template<class compType>
-void PlanFFT<compType>::initialize(Field<double>*  rfield,Field<compType>*   kfield,const int mem_type, const bool managed )
+void PlanFFT<compType>::initialize(Field<double>*  rfield,Field<compType>*   kfield,const int mem_type )
 {
   type_ = R2C;
   mem_type_=mem_type;
-  if (managed) tempMemory.setDeviceWorkspaceManaged(true);
 
   //general variable
   if(rfield->components() != kfield->components())
@@ -1044,23 +1016,19 @@ void PlanFFT<compType>::initialize(Field<double>*  rfield,Field<compType>*   kfi
   {
     if(rfield_size>kfield_size*2)
     {
-      if (managed) rfield->alloc(rfield_size, Field<double>::managed);
-      else rfield->alloc();
+      rfield->alloc();
       kfield->data() = (Imag *)rfield->data();
     }
     else
     {
-      if (managed) kfield->alloc(kfield_size, Field<compType>::managed);
-      else kfield->alloc();
+      kfield->alloc();
       rfield->data() = (double *)kfield->data();
     }
   }
   if(mem_type_ == FFT_OUT_OF_PLACE)
   {
-    if (managed) rfield->alloc(rfield_size, Field<double>::managed);
-    else rfield->alloc(rfield_size);
-    if (managed) kfield->alloc(kfield_size, Field<compType>::managed);
-    else kfield->alloc(kfield_size);
+    rfield->alloc(rfield_size, Field<double>::managed);
+    kfield->alloc(kfield_size);
   }
 
 

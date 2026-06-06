@@ -108,22 +108,34 @@ struct row_buffer
     // Flag to check if the array is sorted
     bool sorted;
     // Resize the array
-    void resize(int new_capacity);
+    void resize(int new_capacity, bool managed = false);
     void resizeManaged(int new_capacity);
 };
 
 // resize function
 template <typename p_type, typename q_type, typename other_type>
-void row_buffer<p_type, q_type, other_type>::resize(int new_capacity)
+void row_buffer<p_type, q_type, other_type>::resize(int new_capacity, bool managed)
 {
     if (capacity < 0)
     {
         throw std::runtime_error("Trying to resize unmanaged row buffer");
     }
+    p_type * new_p;
+    q_type * new_q;
+    other_type * new_other;
     // Reallocate the arrays using realloc
-    p_type * new_p = (p_type *)realloc(p, new_capacity * 3 * sizeof(p_type));
-    q_type * new_q = (q_type *)realloc(q, new_capacity * 3 * sizeof(q_type));
-    other_type * new_other = (other_type *)realloc(other, new_capacity * sizeof(other_type));
+    if (!managed)
+    {
+        new_p = (p_type *)realloc(p, new_capacity * 3 * sizeof(p_type));
+        new_q = (q_type *)realloc(q, new_capacity * 3 * sizeof(q_type));
+        new_other = (other_type *)realloc(other, new_capacity * sizeof(other_type));
+    }
+    else
+    {
+        new_p = cuda_reallocManaged(p, capacity * 3, new_capacity * 3);
+        new_q = cuda_reallocManaged(q, capacity * 3, new_capacity * 3);
+        new_other = cuda_reallocManaged(other, capacity, new_capacity);
+    }
     // Check if the reallocation was successful
     if (new_p == NULL || new_q == NULL || new_other == NULL)
     {
@@ -142,52 +154,7 @@ void row_buffer<p_type, q_type, other_type>::resize(int new_capacity)
 template <typename p_type, typename q_type, typename other_type>
 void row_buffer<p_type, q_type, other_type>::resizeManaged(int new_capacity)
 {
-    if (capacity < 0)
-    {
-        throw std::runtime_error("Trying to resize unmanaged row buffer");
-    }
-
-    p_type * new_p = nullptr;
-    q_type * new_q = nullptr;
-    other_type * new_other = nullptr;
-
-    auto success = cudaMallocManaged(reinterpret_cast<void **>(&new_p), new_capacity * 3 * sizeof(p_type));
-    if (success != cudaSuccess)
-    {
-        throw std::runtime_error("Memory allocation failed for managed row_buffer position resize");
-    }
-
-    success = cudaMallocManaged(reinterpret_cast<void **>(&new_q), new_capacity * 3 * sizeof(q_type));
-    if (success != cudaSuccess)
-    {
-        cudaFree(new_p);
-        throw std::runtime_error("Memory allocation failed for managed row_buffer momentum resize");
-    }
-
-    success = cudaMallocManaged(reinterpret_cast<void **>(&new_other), new_capacity * sizeof(other_type));
-    if (success != cudaSuccess)
-    {
-        cudaFree(new_p);
-        cudaFree(new_q);
-        throw std::runtime_error("Memory allocation failed for managed row_buffer metadata resize");
-    }
-
-    int copy_count = std::min(count, capacity);
-    if (copy_count > 0)
-    {
-        cudaMemcpy(new_p, p, copy_count * 3 * sizeof(p_type), cudaMemcpyDefault);
-        cudaMemcpy(new_q, q, copy_count * 3 * sizeof(q_type), cudaMemcpyDefault);
-        cudaMemcpy(new_other, other, copy_count * sizeof(other_type), cudaMemcpyDefault);
-    }
-
-    cudaFree(p);
-    cudaFree(q);
-    cudaFree(other);
-
-    p = new_p;
-    q = new_q;
-    other = new_other;
-    capacity = new_capacity;
+    resize(new_capacity, true);
 }
 
 template <typename part, typename part_info>
@@ -205,7 +172,7 @@ template <typename T>
 __global__ void reorder_data(unsigned long long int * indices_out, T * data_in, T * data_out, size_t stride, size_t ndata);
 
 template <typename part, typename part_info, typename UpdateFunct>
-__global__ void update_particles(perfParticles<part, part_info> * pcl, UpdateFunct update_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int * reduce_type, int noutput, Real * v2, bool copyout = true, void ** vparams = NULL);
+__global__ void update_particles(perfParticles<part, part_info> * pcl, UpdateFunct update_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int * reduce_type, int noutput, Real * v2, bool copyout = true, void ** vparams = nullptr);
 
 template <typename part, typename part_info>
 __global__ void project_particles(perfParticles<part, part_info> * pcl, Real * target, int projection_order, long start_idx, long jump0, long jump1, long jump2, int stencil_k);
@@ -220,7 +187,7 @@ class perfParticles
         // Destructor
         ~perfParticles();
         // Initialize the particle handler
-        void initialize(part_info part_global_info, Lattice * lat, Real boxSize[3], uint64_t initial_capacity = PERFPARTICLES_DEFAULT_EXTRACAPACITY, uint64_t extra_capacity = PERFPARTICLES_DEFAULT_EXTRACAPACITY, bool use_managed = false);
+        void initialize(part_info part_global_info, Lattice * lat, Real boxSize[3], uint64_t initial_capacity = PERFPARTICLES_DEFAULT_EXTRACAPACITY, uint64_t extra_capacity = PERFPARTICLES_DEFAULT_EXTRACAPACITY);
         // Add a particle to the handler
         bool addParticle_global(part & newPart);
         // Update row buffers
@@ -362,7 +329,7 @@ class perfParticles
 
         // Flag to check if rows are sorted
         bool rows_sorted_;
-        // Runtime toggle to request managed allocation without changing template type.
+
         bool managed_runtime_;
 
         void resizeGlobalBuffers(uint64_t new_total_capacity)
@@ -432,42 +399,6 @@ class perfParticles
 
         void acquireTemporaryWorkspace(void ** d_temp, bool * d_temp_private, size_t bytes, cudaStream_t & stream, const char * context);
         void releaseTemporaryWorkspace(void ** d_temp, bool * d_temp_private, cudaStream_t & stream);
-
-        void resizeExtraBuffer(int idx, int new_capacity)
-        {
-            if (managed_runtime_)
-                extra_buffer_[idx].resizeManaged(new_capacity);
-            else
-                extra_buffer_[idx].resize(new_capacity);
-        }
-
-        template <typename T>
-        cudaError_t allocateTemporaryArray(T ** ptr, size_t count, cudaStream_t & stream)
-        {
-            if (managed_runtime_)
-                return cudaMallocManaged(reinterpret_cast<void **>(ptr), count * sizeof(T));
-
-            return cudaMallocAsync(reinterpret_cast<void **>(ptr), count * sizeof(T), stream);
-        }
-
-        cudaError_t allocateTemporaryBytes(void ** ptr, size_t bytes, cudaStream_t & stream)
-        {
-            if (managed_runtime_)
-                return cudaMallocManaged(ptr, bytes);
-
-            return cudaMallocAsync(ptr, bytes, stream);
-        }
-
-        cudaError_t freeTemporaryAllocation(void * ptr, cudaStream_t & stream)
-        {
-            if (ptr == nullptr)
-                return cudaSuccess;
-
-            if (managed_runtime_)
-                return cudaFree(ptr);
-
-            return cudaFreeAsync(ptr, stream);
-        }
 
         // helper function for particle-mesh projection
         __device__ void project_particle(Real * target, int projection_order, long start_idx, long jump0, long jump1, long jump2, int row, int stencil_k, int idx);
@@ -552,9 +483,8 @@ perfParticles<part, part_info>::~perfParticles()
 
 // Initialize the particle handler
 template <typename part, typename part_info>
-void perfParticles<part, part_info>::initialize(part_info part_global_info, Lattice * lat, Real boxSize[3], uint64_t initial_capacity, uint64_t extra_capacity, bool use_managed)
+void perfParticles<part, part_info>::initialize(part_info part_global_info, Lattice * lat, Real boxSize[3], uint64_t initial_capacity, uint64_t extra_capacity)
 {
-    managed_runtime_ = use_managed;
     // Store the particle info
     part_global_info_ = part_global_info;
     // Store the lattice
@@ -581,15 +511,7 @@ void perfParticles<part, part_info>::initialize(part_info part_global_info, Latt
     num_row_buffers_ = lat_size_local_[1] * lat_size_local_[2];
 
     // Allocate the row buffers
-    cudaError_t success;
-    if (managed_runtime_)
-    {
-        success = cudaMallocManaged(&row_buffers_, num_row_buffers_ * sizeof(row_buffer<Real, Real, long>));
-    }
-    else
-    {
-        success = cudaMalloc(&row_buffers_, num_row_buffers_ * sizeof(row_buffer<Real, Real, long>));
-    }
+    auto success = cudaMalloc(&row_buffers_, num_row_buffers_ * sizeof(row_buffer<Real, Real, long>));
     // Check if the allocation was successful
     if (success != cudaSuccess || row_buffers_ == nullptr)
     {
@@ -661,7 +583,7 @@ void perfParticles<part, part_info>::initialize(part_info part_global_info, Latt
     // Initialize the flag
     rows_sorted_ = true;
 
-    // allocate extra buffer for adding particles using malloc, or managed memory when requested
+    // allocate extra buffer for adding particles using malloc
     for (int i = 0; i < 9; i++)
     {
         extra_buffer_[i].count = 0;
@@ -676,33 +598,9 @@ void perfParticles<part, part_info>::initialize(part_info part_global_info, Latt
         
         extra_buffer_[i].sorted = true;
 
-        if (managed_runtime_)
-        {
-            success = cudaMallocManaged(reinterpret_cast<void **>(&extra_buffer_[i].p), extra_buffer_[i].capacity * 3 * sizeof(Real));
-            if (success != cudaSuccess)
-                throw std::runtime_error("Memory allocation failed for managed extra position buffer in perfParticles::initialize");
-
-            success = cudaMallocManaged(reinterpret_cast<void **>(&extra_buffer_[i].q), extra_buffer_[i].capacity * 3 * sizeof(Real));
-            if (success != cudaSuccess)
-            {
-                cudaFree(extra_buffer_[i].p);
-                throw std::runtime_error("Memory allocation failed for managed extra momentum buffer in perfParticles::initialize");
-            }
-
-            success = cudaMallocManaged(reinterpret_cast<void **>(&extra_buffer_[i].other), extra_buffer_[i].capacity * sizeof(long));
-            if (success != cudaSuccess)
-            {
-                cudaFree(extra_buffer_[i].p);
-                cudaFree(extra_buffer_[i].q);
-                throw std::runtime_error("Memory allocation failed for managed extra ID buffer in perfParticles::initialize");
-            }
-        }
-        else
-        {
-            extra_buffer_[i].p = (Real *) malloc(extra_buffer_[i].capacity * 3 * sizeof(Real));
-            extra_buffer_[i].q = (Real *) malloc(extra_buffer_[i].capacity * 3 * sizeof(Real));
-            extra_buffer_[i].other = (long *) malloc(extra_buffer_[i].capacity * sizeof(long));
-        }
+        extra_buffer_[i].p = (Real *) malloc(extra_buffer_[i].capacity * 3 * sizeof(Real));
+        extra_buffer_[i].q = (Real *) malloc(extra_buffer_[i].capacity * 3 * sizeof(Real));
+        extra_buffer_[i].other = (long *) malloc(extra_buffer_[i].capacity * sizeof(long));
     }
 
     // update device mempool release threshold
@@ -971,21 +869,6 @@ void perfParticles<part, part_info>::acquireTemporaryWorkspace(void ** d_temp, b
     releaseTemporaryWorkspace(d_temp, d_temp_private, stream);
 
 #ifdef FFT3D
-    if (managed_runtime_)
-    {
-        nvtxRangePushA("perfParticles: allocate managed temporary workspace");
-        auto success = cudaMallocManaged(d_temp, bytes);
-        if (success != cudaSuccess)
-        {
-            nvtxRangePop();
-            std::cerr << "CUDA managed malloc failed: " << cudaGetErrorString(success) << std::endl;
-            throw std::runtime_error("Error in CUDA managed malloc for particle temporary workspace");
-        }
-        *d_temp_private = true;
-        nvtxRangePop();
-        return;
-    }
-
     nvtxRangePushA("perfParticles: acquire shared temporary workspace");
     tempMemory.reserveDeviceWorkspaceBytes(bytes, context);
     *d_temp = tempMemory.deviceWorkspace();
@@ -993,7 +876,7 @@ void perfParticles<part, part_info>::acquireTemporaryWorkspace(void ** d_temp, b
     nvtxRangePop();
 #else
     nvtxRangePushA("perfParticles: allocate private temporary workspace");
-    auto success = allocateTemporaryBytes(d_temp, bytes, stream);
+    auto success = cudaMallocAsync(d_temp, bytes, stream);
     if (success != cudaSuccess)
     {
         nvtxRangePop();
@@ -1010,7 +893,7 @@ void perfParticles<part, part_info>::releaseTemporaryWorkspace(void ** d_temp, b
 {
     if (*d_temp != nullptr && *d_temp_private)
     {
-        freeTemporaryAllocation(*d_temp, stream);
+        cudaFreeAsync(*d_temp, stream);
     }
     *d_temp = nullptr;
     *d_temp_private = false;
@@ -1026,14 +909,14 @@ void perfParticles<part, part_info>::prepareComm(unsigned long long int * send_b
     size_t temp_storage_bytes = 0;
     int end_bit = static_cast<int>(ceil(log2(static_cast<double>(num_row_buffers_ + 10))));
 
-    auto success = allocateTemporaryArray(&d_indices_in, num_particles_ * 2L, stream);
+    auto success = cudaMallocAsync(&d_indices_in, num_particles_ * sizeof(unsigned long long int) * 2L, stream);
     if (success != cudaSuccess)
     {
         std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
         throw std::runtime_error("Error in CUDA malloc for d_indices_in");
     }
 
-    success = allocateTemporaryArray(&d_keys_in, num_particles_, stream);
+    success = cudaMallocAsync(&d_keys_in, num_particles_ * sizeof(uint32_t), stream);
     if (success != cudaSuccess)
     {
         std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
@@ -1047,7 +930,7 @@ void perfParticles<part, part_info>::prepareComm(unsigned long long int * send_b
 
     if (*d_keys == nullptr)
     {
-        success = allocateTemporaryArray(d_keys, total_capacity_, stream);
+        success = cudaMallocAsync(d_keys, total_capacity_ * sizeof(uint32_t), stream);
         if (success != cudaSuccess)
         {
             std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
@@ -1074,11 +957,11 @@ void perfParticles<part, part_info>::prepareComm(unsigned long long int * send_b
     cub::DeviceRadixSort::SortPairs(*d_temp, temp_storage_bytes, d_keys_in, *d_keys, d_indices_in, d_indices_out, num_particles_, 0, end_bit, stream);
     nvtxRangePop();
 
-    freeTemporaryAllocation(d_keys_in, stream);
+    cudaFreeAsync(d_keys_in, stream);
 
     reorderParticles(d_indices_out, *d_temp, stream);
 
-    freeTemporaryAllocation(d_indices_in, stream);
+    cudaFreeAsync(d_indices_in, stream);
 
     nvtxRangePushA("prepareComm: update pointers");
 
@@ -1113,7 +996,7 @@ void perfParticles<part, part_info>::computeSortIndices(uint32_t * d_keys, unsig
     size_t temp_storage_bytes2 = 0;
     int end_bit = static_cast<int>(ceil(log2(static_cast<double>(num_row_buffers_))));
 
-    auto success = allocateTemporaryArray(&d_keys_out, num_particles_, stream);
+    auto success = cudaMallocAsync(&d_keys_out, num_particles_ * sizeof(uint32_t), stream);
     if (success != cudaSuccess)
     {
         std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
@@ -1140,7 +1023,7 @@ void perfParticles<part, part_info>::computeSortIndices(uint32_t * d_keys, unsig
     // sort by row key
     cub::DeviceRadixSort::SortPairs(*d_temp, temp_storage_bytes, d_keys, d_keys_out, d_indices, d_indices_out, num_particles_, 0, end_bit, stream);
 
-    success = allocateTemporaryArray(&row_offsets, num_row_buffers_ + 1, stream);
+    success = cudaMallocAsync((void **) & row_offsets, (num_row_buffers_+1) * sizeof(unsigned long long int), stream);
     if (success != cudaSuccess)
     {
         std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
@@ -1154,15 +1037,15 @@ void perfParticles<part, part_info>::computeSortIndices(uint32_t * d_keys, unsig
     d_xkeys_in = d_keys;
     d_xkeys_out = d_keys_out;
 #else
-    freeTemporaryAllocation(d_keys, stream);
-    freeTemporaryAllocation(d_keys_out, stream);
-    success = allocateTemporaryArray(&d_xkeys_in, num_particles_, stream);
+    cudaFreeAsync(d_keys, stream);
+    cudaFreeAsync(d_keys_out, stream);
+    success = cudaMallocAsync((void **) & d_xkeys_in, num_particles_ * sizeof(uint64_t), stream);
     if (success != cudaSuccess)
     {
         std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
         throw std::runtime_error("Error in CUDA malloc for d_xkeys_in");
     }
-    success = allocateTemporaryArray(&d_xkeys_out, num_particles_, stream);
+    success = cudaMallocAsync((void **) & d_xkeys_out, num_particles_ * sizeof(uint64_t), stream);
     if (success != cudaSuccess)
     {
         std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
@@ -1175,9 +1058,9 @@ void perfParticles<part, part_info>::computeSortIndices(uint32_t * d_keys, unsig
 
     // sort by x-keys
     cub::DeviceSegmentedSort::SortPairs(*d_temp, temp_storage_bytes2, d_xkeys_in, d_xkeys_out, d_indices_out, d_indices, num_particles_, num_row_buffers_, row_offsets, row_offsets+1, stream);
-    freeTemporaryAllocation(d_xkeys_in, stream);
-    freeTemporaryAllocation(d_xkeys_out, stream);
-    freeTemporaryAllocation(row_offsets, stream);
+    cudaFreeAsync(d_xkeys_in, stream);
+    cudaFreeAsync(d_xkeys_out, stream);
+    cudaFreeAsync(row_offsets, stream);
 }
 
 // reorder particles
@@ -1280,14 +1163,14 @@ void perfParticles<part, part_info>::updateRowBuffers(unsigned long long int * s
         return row_a < row_b;
     });
 #else
-    success = allocateTemporaryArray(&d_keys_in, num_particles_, pcl_stream);
+    success = cudaMallocAsync(&d_keys_in, num_particles_ * sizeof(uint32_t), pcl_stream);
     if (success != cudaSuccess)
     {
         std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
         throw std::runtime_error("Error in CUDA malloc for d_keys_in");
     }
 
-    success = allocateTemporaryArray(&d_indices, num_particles_ * 2L, pcl_stream);
+    success = cudaMallocAsync(&d_indices, num_particles_ * sizeof(unsigned long long int) * 2L, pcl_stream);
     if (success != cudaSuccess)
     {
         std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
@@ -1301,7 +1184,7 @@ void perfParticles<part, part_info>::updateRowBuffers(unsigned long long int * s
     reorderParticles(d_indices, d_temp, pcl_stream);
 
     releaseTemporaryWorkspace(&d_temp, &d_temp_private, pcl_stream);
-    freeTemporaryAllocation(d_indices, pcl_stream);
+    cudaFreeAsync(d_indices, pcl_stream);
 
     success = cudaStreamSynchronize(pcl_stream);
     if (success != cudaSuccess)
@@ -1333,7 +1216,7 @@ void perfParticles<part, part_info>::updateRowBuffers(unsigned long long int * s
 
 // update particles
 template <typename part, typename part_info, typename UpdateFunct>
-__global__ void update_particles(perfParticles<part, part_info> * pcl, UpdateFunct update_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int * reduce_type, int noutput, Real * v2, bool copyout, void **vparams)
+__global__ void update_particles(perfParticles<part, part_info> * pcl, UpdateFunct update_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int * reduce_type, int noutput, Real * v2, bool copyout, void ** vparams)
 {
     int row = blockIdx.x;
     int thread_id = threadIdx.x;
@@ -1459,7 +1342,7 @@ __global__ void update_particles(perfParticles<part, part_info> * pcl, UpdateFun
 // Particle update helper function
 template <typename part, typename part_info>
 template <typename UpdateFunct>
-void perfParticles<part, part_info>::updateParticles(UpdateFunct update_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int * reduce_type, int noutput, Real * maxvel, bool copyout, bool async, void **vparams)
+void perfParticles<part, part_info>::updateParticles(UpdateFunct update_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int * reduce_type, int noutput, Real * maxvel, bool copyout, bool async, void ** vparams)
 {
     for (int i = 0; i < noutput; i++)
     {
@@ -1704,7 +1587,7 @@ void perfParticles<part, part_info>::projectParticles_Async(UpdateFunct project_
 // Update velocities
 template <typename part, typename part_info>
 template <typename UpdateFunct>
-Real perfParticles<part, part_info>::updateVel(UpdateFunct updateVel_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int * reduce_type, int noutput, void **vparams)
+Real perfParticles<part, part_info>::updateVel(UpdateFunct updateVel_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int * reduce_type, int noutput, void ** vparams)
 {
     Real maxvel = 0.;
 
@@ -1716,7 +1599,7 @@ Real perfParticles<part, part_info>::updateVel(UpdateFunct updateVel_funct, doub
 // Move particles
 template <typename part, typename part_info>
 template <typename UpdateFunct>
-void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int * reduce_type, int noutput, void **vparams)
+void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int * reduce_type, int noutput, void ** vparams)
 {
     nvtxRangePushA("moveParticles");
 
@@ -1737,7 +1620,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         throw std::runtime_error("Error in CUDA stream creation for moveParticles");
     }
 
-    success = allocateTemporaryArray(&d_send_begin, 10, pcl_stream);
+    success = cudaMallocAsync(&d_send_begin, 10 * sizeof(unsigned long long int), pcl_stream);
     if (success != cudaSuccess)
     {
         std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
@@ -1778,7 +1661,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
 
     releaseTemporaryWorkspace(&d_temp, &d_temp_private, pcl_stream);
     cudaMemcpyAsync(send_begin, d_send_begin, 10 * sizeof(unsigned long long int), cudaMemcpyDefault, pcl_stream);
-    freeTemporaryAllocation(d_send_begin, pcl_stream);
+    cudaFreeAsync(d_send_begin, pcl_stream);
 
     success = cudaStreamSynchronize(pcl_stream);
     if (success != cudaSuccess)
@@ -2184,11 +2067,11 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
             {
                 if (proc == 4 || proc % 2)
                 {
-                    resizeExtraBuffer(proc, extra_buffer_[proc].count + extra_capacity_);
+                    extra_buffer_[proc].resizeManaged(extra_buffer_[proc].count + extra_capacity_);
                 }
                 else
                 {
-                    resizeExtraBuffer(proc, extra_buffer_[proc].count + (extra_capacity_ / 4));
+                    extra_buffer_[proc].resizeManaged(extra_buffer_[proc].count + (extra_capacity_ / 4));
                 }
             }
 
@@ -2244,7 +2127,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[1].count + buffer_sizes[0] > extra_buffer_[1].capacity)
             {
-                resizeExtraBuffer(1, extra_buffer_[1].count + buffer_sizes[0] + extra_capacity_);
+                extra_buffer_[1].resizeManaged(extra_buffer_[1].count + buffer_sizes[0] + extra_capacity_);
             }
             
             parallel.receive_dim1(extra_buffer_[1].p+3*extra_buffer_[1].count, 3*buffer_sizes[0], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
@@ -2256,7 +2139,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {        
             if (extra_buffer_[4].count + buffer_sizes[1] > extra_buffer_[4].capacity)
             {
-                resizeExtraBuffer(4, extra_buffer_[4].count + buffer_sizes[1] + extra_capacity_);
+                extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[1] + extra_capacity_);
             }
             
             parallel.receive_dim1(extra_buffer_[4].p, 3*buffer_sizes[1], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
@@ -2268,7 +2151,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[7].count + buffer_sizes[2] > extra_buffer_[7].capacity)
             {
-                resizeExtraBuffer(7, extra_buffer_[7].count + buffer_sizes[2] + extra_capacity_);
+                extra_buffer_[7].resizeManaged(extra_buffer_[7].count + buffer_sizes[2] + extra_capacity_);
             }
             
             parallel.receive_dim1(extra_buffer_[7].p+3*extra_buffer_[7].count, 3*buffer_sizes[2], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
@@ -2313,7 +2196,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[1].count + buffer_sizes[0] > extra_buffer_[1].capacity)
             {
-                resizeExtraBuffer(1, extra_buffer_[1].count + buffer_sizes[0] + extra_capacity_);
+                extra_buffer_[1].resizeManaged(extra_buffer_[1].count + buffer_sizes[0] + extra_capacity_);
             }
             
             parallel.receive_dim1(extra_buffer_[1].p+3*extra_buffer_[1].count, 3*buffer_sizes[0], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
@@ -2325,7 +2208,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[4].count + buffer_sizes[1] > extra_buffer_[4].capacity)
             {
-                resizeExtraBuffer(4, extra_buffer_[4].count + buffer_sizes[1] + extra_capacity_);
+                extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[1] + extra_capacity_);
             }
             
             parallel.receive_dim1(extra_buffer_[4].p+3*extra_buffer_[4].count, 3*buffer_sizes[1], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
@@ -2337,7 +2220,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[7].count + buffer_sizes[2] > extra_buffer_[7].capacity)
             {
-                resizeExtraBuffer(7, extra_buffer_[7].count + buffer_sizes[2] + extra_capacity_);
+                extra_buffer_[7].resizeManaged(extra_buffer_[7].count + buffer_sizes[2] + extra_capacity_);
             }
             
             parallel.receive_dim1(extra_buffer_[7].p+3*extra_buffer_[7].count, 3*buffer_sizes[2], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
@@ -2382,7 +2265,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[1].count + buffer_sizes[0] > extra_buffer_[1].capacity)
             {
-                resizeExtraBuffer(1, extra_buffer_[1].count + buffer_sizes[0] + extra_capacity_);
+                extra_buffer_[1].resizeManaged(extra_buffer_[1].count + buffer_sizes[0] + extra_capacity_);
             }
             
             parallel.receive_dim1(extra_buffer_[1].p+3*extra_buffer_[1].count, 3*buffer_sizes[0], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
@@ -2394,7 +2277,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[4].count + buffer_sizes[1] > extra_buffer_[4].capacity)
             {
-                resizeExtraBuffer(4, extra_buffer_[4].count + buffer_sizes[1] + extra_capacity_);
+                extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[1] + extra_capacity_);
             }
             
             parallel.receive_dim1(extra_buffer_[4].p+3*extra_buffer_[4].count, 3*buffer_sizes[1], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
@@ -2406,7 +2289,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[7].count + buffer_sizes[2] > extra_buffer_[7].capacity)
             {
-                resizeExtraBuffer(7, extra_buffer_[7].count + buffer_sizes[2] + extra_capacity_);
+                extra_buffer_[7].resizeManaged(extra_buffer_[7].count + buffer_sizes[2] + extra_capacity_);
             }
             
             parallel.receive_dim1(extra_buffer_[7].p+3*extra_buffer_[7].count, 3*buffer_sizes[2], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
@@ -2451,7 +2334,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[1].count + buffer_sizes[0] > extra_buffer_[1].capacity)
             {
-                resizeExtraBuffer(1, extra_buffer_[1].count + buffer_sizes[0] + extra_capacity_);
+                extra_buffer_[1].resizeManaged(extra_buffer_[1].count + buffer_sizes[0] + extra_capacity_);
             }
             
             parallel.receive_dim1(extra_buffer_[1].p+3*extra_buffer_[1].count, 3*buffer_sizes[0], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
@@ -2463,7 +2346,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[4].count + buffer_sizes[1] > extra_buffer_[4].capacity)
             {
-                resizeExtraBuffer(4, extra_buffer_[4].count + buffer_sizes[1] + extra_capacity_);
+                extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[1] + extra_capacity_);
             }
             
             parallel.receive_dim1(extra_buffer_[4].p+3*extra_buffer_[4].count, 3*buffer_sizes[1], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
@@ -2475,7 +2358,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[7].count + buffer_sizes[2] > extra_buffer_[7].capacity)
             {
-                resizeExtraBuffer(7, extra_buffer_[7].count + buffer_sizes[2] + extra_capacity_);
+                extra_buffer_[7].resizeManaged(extra_buffer_[7].count + buffer_sizes[2] + extra_capacity_);
             }
             
             parallel.receive_dim1(extra_buffer_[7].p+3*extra_buffer_[7].count, 3*buffer_sizes[2], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
@@ -2512,7 +2395,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[4].count + buffer_sizes[0] > extra_buffer_[4].capacity)
             {
-                resizeExtraBuffer(4, extra_buffer_[4].count + buffer_sizes[0] + extra_capacity_);
+                extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[0] + extra_capacity_);
             }
             
             parallel.receive_dim0(extra_buffer_[4].p+3*extra_buffer_[4].count, 3*buffer_sizes[0], (parallel.grid_rank()[0]+parallel.grid_size()[0]-1) % parallel.grid_size()[0]);
@@ -2544,7 +2427,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[4].count + buffer_sizes[0] > extra_buffer_[4].capacity)
             {
-                resizeExtraBuffer(4, extra_buffer_[4].count + buffer_sizes[0] + extra_capacity_);
+                extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[0] + extra_capacity_);
             }
             
             parallel.receive_dim0(extra_buffer_[4].p+3*extra_buffer_[4].count, 3*buffer_sizes[0], (parallel.grid_rank()[0]+1) % parallel.grid_size()[0]);
@@ -2576,7 +2459,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[4].count + buffer_sizes[0] > extra_buffer_[4].capacity)
             {
-                resizeExtraBuffer(4, extra_buffer_[4].count + buffer_sizes[0] + extra_capacity_);
+                extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[0] + extra_capacity_);
             }
             
             parallel.receive_dim0(extra_buffer_[4].p+3*extra_buffer_[4].count, 3*buffer_sizes[0], (parallel.grid_rank()[0]+1) % parallel.grid_size()[0]);
@@ -2608,7 +2491,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[4].count + buffer_sizes[0] > extra_buffer_[4].capacity)
             {
-                resizeExtraBuffer(4, extra_buffer_[4].count + buffer_sizes[0] + extra_capacity_);
+                extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[0] + extra_capacity_);
             }
             
             parallel.receive_dim0(extra_buffer_[4].p+3*extra_buffer_[4].count, 3*buffer_sizes[0], (parallel.grid_rank()[0]+parallel.grid_size()[0]-1) % parallel.grid_size()[0]);
@@ -2662,7 +2545,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
     {
         uint32_t * d_keys_temp = d_keys;
 
-        success = allocateTemporaryArray(&d_keys, num_particles_, pcl_stream);
+        success = cudaMallocAsync((void **) &d_keys, num_particles_ * sizeof(uint32_t), pcl_stream);
         if (success != cudaSuccess)
         {
             throw std::runtime_error("CUDA malloc failed in moveParticles");
@@ -2674,7 +2557,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
             throw std::runtime_error("CUDA memcpy failed in moveParticles");
         }
 
-        freeTemporaryAllocation(d_keys_temp, pcl_stream);
+        cudaFreeAsync(d_keys_temp, pcl_stream);
     }
 
     if (num_particles_ > start_num_particles)
@@ -2685,7 +2568,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
     nvtxRangePushA("moveParticles: sort particles");
 
     unsigned long long * d_indices_in;
-    success = allocateTemporaryArray(&d_indices_in, num_particles_ * 2L, pcl_stream);
+    success = cudaMallocAsync((void **) &d_indices_in, num_particles_ * sizeof(unsigned long long) * 2L, pcl_stream);
     if (success != cudaSuccess)
     {
         throw std::runtime_error("CUDA malloc failed in moveParticles");
@@ -2698,7 +2581,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
     reorderParticles(d_indices_in, d_temp, pcl_stream);
 
     releaseTemporaryWorkspace(&d_temp, &d_temp_private, pcl_stream);
-    freeTemporaryAllocation(d_indices_in, pcl_stream);
+    cudaFreeAsync(d_indices_in, pcl_stream);
 
     update_pointers<<<(num_row_buffers_+137)/128, 128, 0, pcl_stream>>>(this, nullptr);
 

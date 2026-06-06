@@ -2,7 +2,6 @@
 #define LATTICE_LOOP_HPP
 
 #include <cuda/atomic>
-#include <type_traits>
 
 using namespace LATfield2;
 
@@ -191,6 +190,7 @@ __global__ void lattice_for_each(ForEachFunct funct, int numpts, Field<Real> ** 
     }
 }
 
+
 template <typename ForEachHaloFunct>
 __global__ void lattice_for_each_halo(ForEachHaloFunct funct, int numpts, int halo, int size0, int size1, int size2, Field<Real> ** fields, int nfields, double * params)
 {
@@ -245,9 +245,8 @@ __host__ __device__ void lattice_add(Field<Real> * fields[], Site * sites, int n
 template <int components = 1>
 struct lattice_add_functor
 {
-    __host__ __device__ void operator()(Field<Real> * fields[], Site * sites, int nfields, double * params, double * outputs, void ** vparams = nullptr)
+	__host__ __device__ void operator()(Field<Real> * fields[], Site * sites, int nfields, double * params, double * outputs)
 	{
-        (void) vparams;
 		lattice_add<components>(fields, sites, nfields, params, outputs);
 	}
 };
@@ -268,9 +267,8 @@ __host__ __device__ void lattice_multiply(Field<Real> * fields[], Site * sites, 
 template <int components = 1>
 struct lattice_multiply_functor
 {
-    __host__ __device__ void operator()(Field<Real> * fields[], Site * sites, int nfields, double * params, double * outputs, void ** vparams = nullptr)
+	__host__ __device__ void operator()(Field<Real> * fields[], Site * sites, int nfields, double * params, double * outputs)
 	{
-        (void) vparams;
 		lattice_multiply<components>(fields, sites, nfields, params, outputs);
 	}
 };

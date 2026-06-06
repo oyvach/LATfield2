@@ -369,8 +369,9 @@ class Field
 
 	    void saveSliceHDF5(string filename,string dataset_name , int xcoord, int thickness = 1);
 	    void saveSliceHDF5(string filename, int xcoord, int thickness = 1){this->saveSliceHDF5(filename,"data",xcoord,thickness);}
-	    void saveSliceHDF5_coarseGrain2D(string filename, string dataset_name, int xcoord, int thickness = 1, int ratio = 1);
+		void saveSliceHDF5_coarseGrain2D(string filename, string dataset_name, int xcoord, int thickness = 1, int ratio = 1);
 	    void saveSliceHDF5_coarseGrain2D(string filename, int xcoord, int thickness = 1, int ratio = 1) { this->saveSliceHDF5_coarseGrain2D(filename, "data", xcoord, thickness, ratio); }
+
 
 
 
@@ -820,8 +821,18 @@ void Field<FieldType>::alloc(long size, int alloc_type)
 #endif
 		}
 
-		// Managed fields intentionally do not set a preferred device location here.
-		// This leaves oversubscription and NUMA-backed migration available to CUDA.
+		if (alloc_type == managed)
+		{
+			success = cudaMemPrefetchAsync(data_, data_memSize_ * sizeof(FieldType), 0);
+			if (success != cudaSuccess)
+			{
+				cout << "LATField2d::Field::alloc(long size, int alloc_type)  :process " << parallel.rank() << " cannot prefetch the managed memory to CPU." << endl;
+				throw std::runtime_error("CUDA memory prefetch failed");
+			}
+			cudaMemAdvise(data_, data_memSize_ * sizeof(FieldType), cudaMemAdviseSetPreferredLocation, 0);
+			cudaMemAdvise(data_, data_memSize_ * sizeof(FieldType), cudaMemAdviseSetAccessedBy, 0);
+			cudaDeviceSynchronize();
+		}
 	}
 	else
 	{
@@ -2479,6 +2490,7 @@ void  Field<FieldType>::saveSliceHDF5(string filename, string dataset_name,int x
 
 }
 
+
 template <class FieldType>
 void Field<FieldType>::saveSliceHDF5_coarseGrain2D(string filename, string dataset_name, int xcoord, int thickness, int ratio)
 {
@@ -2562,6 +2574,7 @@ void Field<FieldType>::saveSliceHDF5_coarseGrain2D(string filename, string datas
 	COUT << "aborting.... " << endl;
 #endif
 }
+
 
 template <class FieldType>
 void  Field<FieldType>::saveHDF5_coarseGrain3D(string filename, string dataset_name, int ratio)
