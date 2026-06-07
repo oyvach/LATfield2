@@ -46,6 +46,14 @@ struct tripleReal
     Real z;
 };
 
+#ifdef PINT64
+using perfParticleCount = long long int;
+using perfParticleIndex = unsigned long long int;
+#else
+using perfParticleCount = int;
+using perfParticleIndex = int;
+#endif
+
 // cuda_realloc function to reallocate memory on device
 template <typename T>
 T * cuda_realloc(T * ptr, size_t old_size, size_t new_size)
@@ -102,19 +110,19 @@ struct row_buffer
     // Array of other particle properties
     other_type *other;
     // Number of particles
-    int count;
+    perfParticleCount count;
     // Capacity of the array
-    int capacity;
+    perfParticleCount capacity;
     // Flag to check if the array is sorted
     bool sorted;
     // Resize the array
-    void resize(int new_capacity, bool managed = false);
-    void resizeManaged(int new_capacity);
+    void resize(perfParticleCount new_capacity, bool managed = false);
+    void resizeManaged(perfParticleCount new_capacity);
 };
 
 // resize function
 template <typename p_type, typename q_type, typename other_type>
-void row_buffer<p_type, q_type, other_type>::resize(int new_capacity, bool managed)
+void row_buffer<p_type, q_type, other_type>::resize(perfParticleCount new_capacity, bool managed)
 {
     if (capacity < 0)
     {
@@ -152,7 +160,7 @@ void row_buffer<p_type, q_type, other_type>::resize(int new_capacity, bool manag
 
 // resizeManaged function
 template <typename p_type, typename q_type, typename other_type>
-void row_buffer<p_type, q_type, other_type>::resizeManaged(int new_capacity)
+void row_buffer<p_type, q_type, other_type>::resizeManaged(perfParticleCount new_capacity)
 {
     resize(new_capacity, true);
 }
@@ -401,14 +409,14 @@ class perfParticles
         void releaseTemporaryWorkspace(void ** d_temp, bool * d_temp_private, cudaStream_t & stream);
 
         // helper function for particle-mesh projection
-        __device__ void project_particle(Real * target, int projection_order, long start_idx, long jump0, long jump1, long jump2, int row, int stencil_k, int idx);
+        __device__ void project_particle(Real * target, int projection_order, long start_idx, long jump0, long jump1, long jump2, int row, int stencil_k, perfParticleIndex idx);
 
         // helper function for particle updates
         template <typename UpdateFunct>
         void updateParticles(UpdateFunct update_funct, double dtau, Field<Real> ** fields = NULL, int nfields = 0, double * params = NULL, double * output = NULL, int * reduce_type = NULL, int noutput = 0, Real * maxvel = nullptr, bool copyout = true, bool async = false, void ** vparams = NULL);
 
         template <typename UpdateFunct>
-        __host__ __device__ auto updateParticle(int row, int idx, UpdateFunct update_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int noutput, bool copyout = true, void ** vparams = NULL);
+        __host__ __device__ auto updateParticle(int row, perfParticleIndex idx, UpdateFunct update_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int noutput, bool copyout = true, void ** vparams = NULL);
 
         // friend functions
 
@@ -510,10 +518,14 @@ void perfParticles<part, part_info>::initialize(part_info part_global_info, Latt
     // compute number of row buffers
     num_row_buffers_ = lat_size_local_[1] * lat_size_local_[2];
 
+    cudaError_t success;
     // Allocate the row buffers
-    auto success = cudaMalloc(&row_buffers_, num_row_buffers_ * sizeof(row_buffer<Real, Real, long>));
+    if (!managed_runtime_)
+        success = cudaMalloc(&row_buffers_, num_row_buffers_ * sizeof(row_buffer<Real, Real, long>));
+    else
+        success = cudaMallocManaged(&row_buffers_, num_row_buffers_ * sizeof(row_buffer<Real, Real, long>));
     // Check if the allocation was successful
-    if (success != cudaSuccess || row_buffers_ == nullptr)
+    if (success != cudaSuccess || row_buffers_   == nullptr)
     {
         std::cerr << " proc#" << parallel.rank() << " cudaMalloc failed: " << cudaGetErrorString(success) << std::endl;
         // If not, throw an exception
@@ -750,7 +762,13 @@ __global__ void update_pointers(perfParticles<part, part_info> * pcl, unsigned l
 template <typename part, typename part_info>
 __global__ void compute_rows(perfParticles<part, part_info> * pcl, uint32_t * row, unsigned long long int starting_idx)
 {
+#ifdef PINT64
+    unsigned long long int idx =
+        static_cast<unsigned long long int>(blockIdx.x) * static_cast<unsigned long long int>(blockDim.x) +
+        static_cast<unsigned long long int>(threadIdx.x) + starting_idx;
+#else
     unsigned long long int idx = blockIdx.x * blockDim.x + threadIdx.x + starting_idx;
+#endif
 
     if (idx < pcl->num_particles_)
     {
@@ -765,7 +783,13 @@ __global__ void compute_xkeys(uint32_t * keys, unsigned long long int * indices,
 __global__ void compute_xkeys(uint64_t * keys, unsigned long long int * indices, Real * p, unsigned long long int num_particles)
 #endif
 {
+#ifdef PINT64
+    unsigned long long int idx =
+        static_cast<unsigned long long int>(blockIdx.x) * static_cast<unsigned long long int>(blockDim.x) +
+        static_cast<unsigned long long int>(threadIdx.x);
+#else
     unsigned long long int idx = blockIdx.x * blockDim.x + threadIdx.x;
+#endif
 
     if (idx < num_particles)
     {
@@ -818,7 +842,13 @@ __global__ void compute_row_offsets(const uint32_t * keys, unsigned long long in
 template <typename T>
 __global__ void reorder_data(unsigned long long int * indices_out, T * data_in, T * data_out, size_t stride, size_t ndata)
 {
+#ifdef PINT64
+    unsigned long long int idx =
+        static_cast<unsigned long long int>(blockIdx.x) * static_cast<unsigned long long int>(blockDim.x) +
+        static_cast<unsigned long long int>(threadIdx.x);
+#else
     unsigned long long int idx = blockIdx.x * blockDim.x + threadIdx.x;
+#endif
 
     if (idx < ndata)
     {
@@ -1258,7 +1288,7 @@ __global__ void update_particles(perfParticles<part, part_info> * pcl, UpdateFun
 
     using return_type = decltype(pcl->updateParticle(row, thread_id, update_funct, dtau, fields, nfields, params, output_thread, noutput, copyout, vparams));
 
-    for (int idx = thread_id; idx < pcl->row_buffers_[row].count; idx += 128)
+    for (perfParticleIndex idx = static_cast<perfParticleIndex>(thread_id); idx < static_cast<perfParticleIndex>(pcl->row_buffers_[row].count); idx += 128)
     {
         if constexpr (std::is_same_v<return_type, void>)
         {
@@ -1510,7 +1540,7 @@ void perfParticles<part, part_info>::updateParticles(UpdateFunct update_funct, d
 // Particle update helper function
 template <typename part, typename part_info>
 template <typename UpdateFunct>
-__host__ __device__ auto perfParticles<part, part_info>::updateParticle(int row, int idx, UpdateFunct update_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int noutput, bool copyout, void ** vparams)
+__host__ __device__ auto perfParticles<part, part_info>::updateParticle(int row, perfParticleIndex idx, UpdateFunct update_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int noutput, bool copyout, void ** vparams)
 {
     // Initialize sites for field operations
     Site * sites = nullptr;
@@ -1649,9 +1679,12 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
     updateParticles(move_funct, dtau, fields, nfields, params, output, reduce_type, noutput, nullptr, true, false, vparams);
 
     nvtxRangePop();
-
+    // FIX:
+#ifdef DEBUG_RADIX_SORT
     thrust::for_each(thrust::device, row_buffers_, row_buffers_ + num_row_buffers_, [] __device__ (row_buffer<Real, Real, long> & rb) { rb.sorted = false;});
-
+#else
+    thrust::for_each(thrust::cuda::par.on(pcl_stream), row_buffers_, row_buffers_ + num_row_buffers_, [] __device__ (row_buffer<Real, Real, long> & rb) { rb.sorted = false;});
+#endif
     rows_sorted_ = false;
 
 #ifdef DEBUG_RADIX_SORT
@@ -2527,7 +2560,14 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
 
     tripleReal * pos = (tripleReal *) p;
 
-    thrust::for_each(thrust::device, pos, pos+num_particles_, [this] __host__ __device__ (tripleReal& a) {
+    // FIX: 
+    // thrust::for_each(thrust::device, pos, pos+num_particles_, [this] __host__ __device__ (tripleReal& a) {
+#ifndef DEBUG_RADIX_SORT
+    thrust::for_each(thrust::cuda::par.on(pcl_stream), pos, pos+num_particles_, [this] __host__ __device__ (tripleReal& a)
+#else
+    thrust::for_each(thrust::device, pos, pos+num_particles_, [this] __host__ __device__ (tripleReal& a)
+#endif
+    {
         Real * pos_a = (Real *) &a;
 
         for (int i = 0; i < 3; i++)
@@ -2614,7 +2654,7 @@ __global__ void project_particles(perfParticles<part, part_info> * pcl, Real * t
     int row = blockIdx.x;
     int thread_id = threadIdx.x;
 
-    for (int idx = thread_id; idx < pcl->row_buffers_[row].count; idx += 128)
+    for (perfParticleIndex idx = static_cast<perfParticleIndex>(thread_id); idx < static_cast<perfParticleIndex>(pcl->row_buffers_[row].count); idx += 128)
     {
         pcl->project_particle(target, projection_order, start_idx, jump0, jump1, jump2, row, stencil_k, idx);
     }
@@ -2649,7 +2689,7 @@ void perfParticles<part, part_info>::meshprojection_project(Field<Real> * target
 
 // project particle
 template <typename part, typename part_info>
-__device__ void perfParticles<part, part_info>::project_particle(Real * target, int projection_order, long start_idx, long jump0, long jump1, long jump2, int row, int stencil_k, int idx)
+__device__ void perfParticles<part, part_info>::project_particle(Real * target, int projection_order, long start_idx, long jump0, long jump1, long jump2, int row, int stencil_k, perfParticleIndex idx)
 {
     int coord[3];
     Real frac[3];
