@@ -1,6 +1,9 @@
 #ifndef LATFIELD2_PARALLEL2D_HPP
 #define LATFIELD2_PARALLEL2D_HPP
 
+#include <algorithm>
+#include <climits>
+#include <limits>
 
 #include "LATfield2_parallel2d_decl.hpp"
 
@@ -12,6 +15,123 @@
  \brief LATfield2_parallel2d.hpp contains the class Parallel2d implementation.
  \author David Daverio, edited by Wessel Valkenburg
  */
+
+template <class Type>
+inline int latfield2_mpi_byte_count_or_throw(const char * op, int len)
+{
+	if (len < 0)
+	{
+		cerr << "LATfield2::Parallel2d::" << op
+		     << " : NB send/recv count overflowed before MPI call (len=" << len
+		     << ", sizeof(Type)=" << sizeof(Type) << ")." << endl;
+		throw std::runtime_error("LATfield2 MPI element count overflow");
+	}
+
+	size_t byte_count = static_cast<size_t>(len) * sizeof(Type);
+	if (byte_count > static_cast<size_t>(INT_MAX))
+	{
+		cerr << "LATfield2::Parallel2d::" << op
+		     << " : NB send/recv byte count will overflow MPI int count (len=" << len
+		     << ", sizeof(Type)=" << sizeof(Type)
+		     << ", bytes=" << byte_count << ")." << endl;
+		throw std::runtime_error("LATfield2 MPI byte count overflow");
+	}
+
+	return static_cast<int>(byte_count);
+}
+
+#ifdef PINT64
+template <class Type, class LenType>
+inline unsigned long long latfield2_mpi_byte_count_or_throw_c(const char * op, LenType len)
+{
+	if constexpr (std::numeric_limits<LenType>::is_signed)
+	{
+		if (len < 0)
+		{
+			cerr << "LATfield2::Parallel2d::" << op
+			     << " : NB send/recv count overflowed before MPI call (len=" << len
+			     << ", sizeof(Type)=" << sizeof(Type) << ")." << endl;
+			throw std::runtime_error("LATfield2 MPI element count overflow");
+		}
+	}
+
+	const unsigned long long elem_count = static_cast<unsigned long long>(len);
+	if (elem_count > std::numeric_limits<unsigned long long>::max() / static_cast<unsigned long long>(sizeof(Type)))
+	{
+		const unsigned long long byte_count = elem_count * static_cast<unsigned long long>(sizeof(Type));
+		cerr << "LATfield2::Parallel2d::" << op
+		     << " : NB send/recv byte count will overflow local byte counter (len=" << len
+		     << ", sizeof(Type)=" << sizeof(Type)
+		     << ", bytes=" << byte_count << ")." << endl;
+		throw std::runtime_error("LATfield2 MPI byte count overflow");
+	}
+
+	return elem_count * static_cast<unsigned long long>(sizeof(Type));
+}
+
+template <class Type>
+inline void latfield2_mpi_send_bytes_chunked(Type * array, unsigned long long total_bytes,
+                                             int to, MPI_Comm comm)
+{
+	char * bytes = reinterpret_cast<char*>(array);
+	unsigned long long offset = 0;
+	while (offset < total_bytes)
+	{
+		const unsigned long long remaining = total_bytes - offset;
+		const int chunk = static_cast<int>(std::min<unsigned long long>(
+		    remaining, static_cast<unsigned long long>(INT_MAX)));
+		MPI_Send(bytes + offset, chunk, MPI_BYTE, to, 0, comm);
+		offset += static_cast<unsigned long long>(chunk);
+	}
+}
+
+template <class Type>
+inline void latfield2_mpi_recv_bytes_chunked(Type * array, unsigned long long total_bytes,
+                                             int from, MPI_Comm comm)
+{
+	char * bytes = reinterpret_cast<char*>(array);
+	unsigned long long offset = 0;
+	while (offset < total_bytes)
+	{
+		MPI_Status status;
+		const unsigned long long remaining = total_bytes - offset;
+		const int chunk = static_cast<int>(std::min<unsigned long long>(
+		    remaining, static_cast<unsigned long long>(INT_MAX)));
+		MPI_Recv(bytes + offset, chunk, MPI_BYTE, from, 0, comm, &status);
+		offset += static_cast<unsigned long long>(chunk);
+	}
+}
+
+template <class Type>
+inline void latfield2_mpi_isend_bytes_chunked(Type * array, unsigned long long total_bytes,
+                                              int to, MPI_Comm comm, MPI_Request * request)
+{
+	if (total_bytes <= static_cast<unsigned long long>(INT_MAX))
+	{
+		MPI_Isend(reinterpret_cast<char*>(array), static_cast<int>(total_bytes), MPI_BYTE,
+		          to, 0, comm, request);
+		return;
+	}
+
+	latfield2_mpi_send_bytes_chunked(array, total_bytes, to, comm);
+	if (request != nullptr) *request = MPI_REQUEST_NULL;
+}
+
+template <class Type>
+inline void latfield2_mpi_irecv_bytes_chunked(Type * array, unsigned long long total_bytes,
+                                              int from, MPI_Comm comm, MPI_Request * request)
+{
+	if (total_bytes <= static_cast<unsigned long long>(INT_MAX))
+	{
+		MPI_Irecv(reinterpret_cast<char*>(array), static_cast<int>(total_bytes), MPI_BYTE,
+		          from, 0, comm, request);
+		return;
+	}
+
+	latfield2_mpi_recv_bytes_chunked(array, total_bytes, from, comm);
+	if (request != nullptr) *request = MPI_REQUEST_NULL;
+}
+#endif
 
 
 Parallel2d::Parallel2d() : neverFinalizeMPI(false)
@@ -1321,13 +1441,55 @@ template<class Type> void Parallel2d::send_dim0(Type& message, int to)
 
 template<class Type> void Parallel2d::send_dim0(Type* array, int len, int to)
 {
-    MPI_Send( array, len*sizeof(Type), MPI_BYTE, to, 0, dim0_comm_[grid_rank_[1]] );
+    MPI_Send( array, latfield2_mpi_byte_count_or_throw<Type>("send_dim0", len), MPI_BYTE, to, 0, dim0_comm_[grid_rank_[1]] );
 }
 
 template<class Type> void Parallel2d::isend_dim0(Type* array, int len, int to, MPI_Request * request)
 {
-    MPI_Isend( array, len*sizeof(Type), MPI_BYTE, to, 0, dim0_comm_[grid_rank_[1]], request );
+    MPI_Isend( array, latfield2_mpi_byte_count_or_throw<Type>("isend_dim0", len), MPI_BYTE, to, 0, dim0_comm_[grid_rank_[1]], request );
 }
+
+#ifdef PINT64
+template<class Type> void Parallel2d::send_dim0(Type* array, long len, int to)
+{
+    latfield2_mpi_send_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("send_dim0", len), to, dim0_comm_[grid_rank_[1]]);
+}
+
+template<class Type> void Parallel2d::send_dim0(Type* array, long long len, int to)
+{
+    latfield2_mpi_send_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("send_dim0", len), to, dim0_comm_[grid_rank_[1]]);
+}
+
+template<class Type> void Parallel2d::send_dim0(Type* array, unsigned long len, int to)
+{
+    latfield2_mpi_send_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("send_dim0", len), to, dim0_comm_[grid_rank_[1]]);
+}
+
+template<class Type> void Parallel2d::send_dim0(Type* array, unsigned long long len, int to)
+{
+    latfield2_mpi_send_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("send_dim0", len), to, dim0_comm_[grid_rank_[1]]);
+}
+
+template<class Type> void Parallel2d::isend_dim0(Type* array, long len, int to, MPI_Request * request)
+{
+    latfield2_mpi_isend_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("isend_dim0", len), to, dim0_comm_[grid_rank_[1]], request);
+}
+
+template<class Type> void Parallel2d::isend_dim0(Type* array, long long len, int to, MPI_Request * request)
+{
+    latfield2_mpi_isend_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("isend_dim0", len), to, dim0_comm_[grid_rank_[1]], request);
+}
+
+template<class Type> void Parallel2d::isend_dim0(Type* array, unsigned long len, int to, MPI_Request * request)
+{
+    latfield2_mpi_isend_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("isend_dim0", len), to, dim0_comm_[grid_rank_[1]], request);
+}
+
+template<class Type> void Parallel2d::isend_dim0(Type* array, unsigned long long len, int to, MPI_Request * request)
+{
+    latfield2_mpi_isend_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("isend_dim0", len), to, dim0_comm_[grid_rank_[1]], request);
+}
+#endif
 
 template<class Type> void Parallel2d::send_dim1(Type& message, int to)
 {
@@ -1338,14 +1500,56 @@ template<class Type> void Parallel2d::send_dim1(Type& message, int to)
 template<class Type> void Parallel2d::send_dim1(Type* array, int len, int to)
 {
 
-    MPI_Send( array, len*sizeof(Type), MPI_BYTE, to, 0, dim1_comm_[grid_rank_[0]] );
+    MPI_Send( array, latfield2_mpi_byte_count_or_throw<Type>("send_dim1", len), MPI_BYTE, to, 0, dim1_comm_[grid_rank_[0]] );
 }
 
 template<class Type> void Parallel2d::isend_dim1(Type* array, int len, int to, MPI_Request * request)
 {
 
-    MPI_Isend( array, len*sizeof(Type), MPI_BYTE, to, 0, dim1_comm_[grid_rank_[0]], request );
+    MPI_Isend( array, latfield2_mpi_byte_count_or_throw<Type>("isend_dim1", len), MPI_BYTE, to, 0, dim1_comm_[grid_rank_[0]], request );
 }
+
+#ifdef PINT64
+template<class Type> void Parallel2d::send_dim1(Type* array, long len, int to)
+{
+    latfield2_mpi_send_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("send_dim1", len), to, dim1_comm_[grid_rank_[0]]);
+}
+
+template<class Type> void Parallel2d::send_dim1(Type* array, long long len, int to)
+{
+    latfield2_mpi_send_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("send_dim1", len), to, dim1_comm_[grid_rank_[0]]);
+}
+
+template<class Type> void Parallel2d::send_dim1(Type* array, unsigned long len, int to)
+{
+    latfield2_mpi_send_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("send_dim1", len), to, dim1_comm_[grid_rank_[0]]);
+}
+
+template<class Type> void Parallel2d::send_dim1(Type* array, unsigned long long len, int to)
+{
+    latfield2_mpi_send_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("send_dim1", len), to, dim1_comm_[grid_rank_[0]]);
+}
+
+template<class Type> void Parallel2d::isend_dim1(Type* array, long len, int to, MPI_Request * request)
+{
+    latfield2_mpi_isend_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("isend_dim1", len), to, dim1_comm_[grid_rank_[0]], request);
+}
+
+template<class Type> void Parallel2d::isend_dim1(Type* array, long long len, int to, MPI_Request * request)
+{
+    latfield2_mpi_isend_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("isend_dim1", len), to, dim1_comm_[grid_rank_[0]], request);
+}
+
+template<class Type> void Parallel2d::isend_dim1(Type* array, unsigned long len, int to, MPI_Request * request)
+{
+    latfield2_mpi_isend_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("isend_dim1", len), to, dim1_comm_[grid_rank_[0]], request);
+}
+
+template<class Type> void Parallel2d::isend_dim1(Type* array, unsigned long long len, int to, MPI_Request * request)
+{
+    latfield2_mpi_isend_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("isend_dim1", len), to, dim1_comm_[grid_rank_[0]], request);
+}
+#endif
 
 
 
@@ -1360,12 +1564,12 @@ template<class Type> void Parallel2d::receive(Type& message, int from)
 template<class Type> void Parallel2d::receive(Type* array, int len, int from)
 {
 	MPI_Status  status;
-	MPI_Recv( array, len*sizeof(Type), MPI_BYTE, from, 0, world_comm_, &status);
+	MPI_Recv( array, latfield2_mpi_byte_count_or_throw<Type>("receive", len), MPI_BYTE, from, 0, world_comm_, &status);
 }
 
 template<class Type> void Parallel2d::ireceive(Type* array, int len, int from, MPI_Request * request)
 {
-	MPI_Irecv( array, len*sizeof(Type), MPI_BYTE, from, 0, world_comm_, request);
+	MPI_Irecv( array, latfield2_mpi_byte_count_or_throw<Type>("ireceive", len), MPI_BYTE, from, 0, world_comm_, request);
 }
 
 template<class Type> void Parallel2d::receive_dim0(Type& message, int from)
@@ -1379,14 +1583,56 @@ template<class Type> void Parallel2d::receive_dim0(Type* array, int len, int fro
 {
 
     MPI_Status  status;
-    MPI_Recv( array, len*sizeof(Type), MPI_BYTE, from, 0, dim0_comm_[grid_rank_[1]], &status);
+    MPI_Recv( array, latfield2_mpi_byte_count_or_throw<Type>("receive_dim0", len), MPI_BYTE, from, 0, dim0_comm_[grid_rank_[1]], &status);
 }
 
 template<class Type> void Parallel2d::ireceive_dim0(Type* array, int len, int from, MPI_Request * request)
 {
 
-    MPI_Irecv( array, len*sizeof(Type), MPI_BYTE, from, 0, dim0_comm_[grid_rank_[1]], request);
+    MPI_Irecv( array, latfield2_mpi_byte_count_or_throw<Type>("ireceive_dim0", len), MPI_BYTE, from, 0, dim0_comm_[grid_rank_[1]], request);
 }
+
+#ifdef PINT64
+template<class Type> void Parallel2d::receive_dim0(Type* array, long len, int from)
+{
+    latfield2_mpi_recv_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("receive_dim0", len), from, dim0_comm_[grid_rank_[1]]);
+}
+
+template<class Type> void Parallel2d::receive_dim0(Type* array, long long len, int from)
+{
+    latfield2_mpi_recv_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("receive_dim0", len), from, dim0_comm_[grid_rank_[1]]);
+}
+
+template<class Type> void Parallel2d::receive_dim0(Type* array, unsigned long len, int from)
+{
+    latfield2_mpi_recv_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("receive_dim0", len), from, dim0_comm_[grid_rank_[1]]);
+}
+
+template<class Type> void Parallel2d::receive_dim0(Type* array, unsigned long long len, int from)
+{
+    latfield2_mpi_recv_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("receive_dim0", len), from, dim0_comm_[grid_rank_[1]]);
+}
+
+template<class Type> void Parallel2d::ireceive_dim0(Type* array, long len, int from, MPI_Request * request)
+{
+    latfield2_mpi_irecv_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("ireceive_dim0", len), from, dim0_comm_[grid_rank_[1]], request);
+}
+
+template<class Type> void Parallel2d::ireceive_dim0(Type* array, long long len, int from, MPI_Request * request)
+{
+    latfield2_mpi_irecv_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("ireceive_dim0", len), from, dim0_comm_[grid_rank_[1]], request);
+}
+
+template<class Type> void Parallel2d::ireceive_dim0(Type* array, unsigned long len, int from, MPI_Request * request)
+{
+    latfield2_mpi_irecv_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("ireceive_dim0", len), from, dim0_comm_[grid_rank_[1]], request);
+}
+
+template<class Type> void Parallel2d::ireceive_dim0(Type* array, unsigned long long len, int from, MPI_Request * request)
+{
+    latfield2_mpi_irecv_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("ireceive_dim0", len), from, dim0_comm_[grid_rank_[1]], request);
+}
+#endif
 
 template<class Type> void Parallel2d::receive_dim1(Type& message, int from)
 {
@@ -1399,14 +1645,56 @@ template<class Type> void Parallel2d::receive_dim1(Type* array, int len, int fro
 {
 
     MPI_Status  status;
-    MPI_Recv( array, len*sizeof(Type), MPI_BYTE, from, 0, dim1_comm_[grid_rank_[0]], &status);
+    MPI_Recv( array, latfield2_mpi_byte_count_or_throw<Type>("receive_dim1", len), MPI_BYTE, from, 0, dim1_comm_[grid_rank_[0]], &status);
 }
 
 template<class Type> void Parallel2d::ireceive_dim1(Type* array, int len, int from, MPI_Request * request)
 {
 
-    MPI_Irecv( array, len*sizeof(Type), MPI_BYTE, from, 0, dim1_comm_[grid_rank_[0]], request);
+    MPI_Irecv( array, latfield2_mpi_byte_count_or_throw<Type>("ireceive_dim1", len), MPI_BYTE, from, 0, dim1_comm_[grid_rank_[0]], request);
 }
+
+#ifdef PINT64
+template<class Type> void Parallel2d::receive_dim1(Type* array, long len, int from)
+{
+    latfield2_mpi_recv_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("receive_dim1", len), from, dim1_comm_[grid_rank_[0]]);
+}
+
+template<class Type> void Parallel2d::receive_dim1(Type* array, long long len, int from)
+{
+    latfield2_mpi_recv_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("receive_dim1", len), from, dim1_comm_[grid_rank_[0]]);
+}
+
+template<class Type> void Parallel2d::receive_dim1(Type* array, unsigned long len, int from)
+{
+    latfield2_mpi_recv_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("receive_dim1", len), from, dim1_comm_[grid_rank_[0]]);
+}
+
+template<class Type> void Parallel2d::receive_dim1(Type* array, unsigned long long len, int from)
+{
+    latfield2_mpi_recv_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("receive_dim1", len), from, dim1_comm_[grid_rank_[0]]);
+}
+
+template<class Type> void Parallel2d::ireceive_dim1(Type* array, long len, int from, MPI_Request * request)
+{
+    latfield2_mpi_irecv_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("ireceive_dim1", len), from, dim1_comm_[grid_rank_[0]], request);
+}
+
+template<class Type> void Parallel2d::ireceive_dim1(Type* array, long long len, int from, MPI_Request * request)
+{
+    latfield2_mpi_irecv_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("ireceive_dim1", len), from, dim1_comm_[grid_rank_[0]], request);
+}
+
+template<class Type> void Parallel2d::ireceive_dim1(Type* array, unsigned long len, int from, MPI_Request * request)
+{
+    latfield2_mpi_irecv_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("ireceive_dim1", len), from, dim1_comm_[grid_rank_[0]], request);
+}
+
+template<class Type> void Parallel2d::ireceive_dim1(Type* array, unsigned long long len, int from, MPI_Request * request)
+{
+    latfield2_mpi_irecv_bytes_chunked(array, latfield2_mpi_byte_count_or_throw_c<Type>("ireceive_dim1", len), from, dim1_comm_[grid_rank_[0]], request);
+}
+#endif
 
 
 template<class Type> void Parallel2d::sendUp_dim0(Type& bufferSend,Type& bufferRec, long len)

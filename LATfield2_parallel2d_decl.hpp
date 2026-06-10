@@ -297,6 +297,16 @@ class Parallel2d{
    */
   template<class Type> void send_dim0(Type* array, int len, int to);
   template<class Type> void isend_dim0(Type* array, int len, int to, MPI_Request * request);
+#ifdef PINT64
+  template<class Type> void send_dim0(Type* array, long len, int to);
+  template<class Type> void send_dim0(Type* array, long long len, int to);
+  template<class Type> void send_dim0(Type* array, unsigned long len, int to);
+  template<class Type> void send_dim0(Type* array, unsigned long long len, int to);
+  template<class Type> void isend_dim0(Type* array, long len, int to, MPI_Request * request);
+  template<class Type> void isend_dim0(Type* array, long long len, int to, MPI_Request * request);
+  template<class Type> void isend_dim0(Type* array, unsigned long len, int to, MPI_Request * request);
+  template<class Type> void isend_dim0(Type* array, unsigned long long len, int to, MPI_Request * request);
+#endif
   /*!
    MPI send method on the compute processes. The method calls MPI_Send in the directional communicator associated with the process caller. (direction=1)
    \param message : variable to send.
@@ -311,6 +321,16 @@ class Parallel2d{
    */
   template<class Type> void send_dim1(Type* array, int len, int to);
   template<class Type> void isend_dim1(Type* array, int len, int to, MPI_Request * request);
+#ifdef PINT64
+  template<class Type> void send_dim1(Type* array, long len, int to);
+  template<class Type> void send_dim1(Type* array, long long len, int to);
+  template<class Type> void send_dim1(Type* array, unsigned long len, int to);
+  template<class Type> void send_dim1(Type* array, unsigned long long len, int to);
+  template<class Type> void isend_dim1(Type* array, long len, int to, MPI_Request * request);
+  template<class Type> void isend_dim1(Type* array, long long len, int to, MPI_Request * request);
+  template<class Type> void isend_dim1(Type* array, unsigned long len, int to, MPI_Request * request);
+  template<class Type> void isend_dim1(Type* array, unsigned long long len, int to, MPI_Request * request);
+#endif
 
 
   /*!
@@ -341,6 +361,16 @@ class Parallel2d{
    */
   template<class Type> void receive_dim0(Type* array, int len, int from);
   template<class Type> void ireceive_dim0(Type* array, int len, int from, MPI_Request * request);
+#ifdef PINT64
+  template<class Type> void receive_dim0(Type* array, long len, int from);
+  template<class Type> void receive_dim0(Type* array, long long len, int from);
+  template<class Type> void receive_dim0(Type* array, unsigned long len, int from);
+  template<class Type> void receive_dim0(Type* array, unsigned long long len, int from);
+  template<class Type> void ireceive_dim0(Type* array, long len, int from, MPI_Request * request);
+  template<class Type> void ireceive_dim0(Type* array, long long len, int from, MPI_Request * request);
+  template<class Type> void ireceive_dim0(Type* array, unsigned long len, int from, MPI_Request * request);
+  template<class Type> void ireceive_dim0(Type* array, unsigned long long len, int from, MPI_Request * request);
+#endif
   /*!
    MPI receive method on the compute processes. The method call MPI_Recv in the directional communicator associated with the process caller. (direction=1)
    \param message : variable which will be assigned to the receive message.
@@ -355,6 +385,16 @@ class Parallel2d{
    */
   template<class Type> void receive_dim1(Type* array, int len, int from);
   template<class Type> void ireceive_dim1(Type* array, int len, int from, MPI_Request * request);
+#ifdef PINT64
+  template<class Type> void receive_dim1(Type* array, long len, int from);
+  template<class Type> void receive_dim1(Type* array, long long len, int from);
+  template<class Type> void receive_dim1(Type* array, unsigned long len, int from);
+  template<class Type> void receive_dim1(Type* array, unsigned long long len, int from);
+  template<class Type> void ireceive_dim1(Type* array, long len, int from, MPI_Request * request);
+  template<class Type> void ireceive_dim1(Type* array, long long len, int from, MPI_Request * request);
+  template<class Type> void ireceive_dim1(Type* array, unsigned long len, int from, MPI_Request * request);
+  template<class Type> void ireceive_dim1(Type* array, unsigned long long len, int from, MPI_Request * request);
+#endif
 
   /*!
    Method to send a message through dim0 of the process grid. Processes of grid_rank_[0]=N will send the message to the grid_rank_[0]=N+1, with a torus topology. Therefore each process will send and receive data.

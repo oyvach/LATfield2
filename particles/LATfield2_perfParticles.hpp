@@ -4,6 +4,9 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
+#include <limits>
+#include <vector>
 
 #include <thrust/sort.h>
 #include <thrust/binary_search.h>
@@ -45,6 +48,61 @@ struct tripleReal
     Real y;
     Real z;
 };
+
+inline void perfParticlesThrowOnCudaError(cudaError_t status, const char * context)
+{
+    if (status != cudaSuccess)
+    {
+        std::cerr << context << " failed: " << cudaGetErrorString(status) << std::endl;
+        throw std::runtime_error(context);
+    }
+}
+
+inline bool perfParticlesCanUseCubSort(uint64_t num_items)
+{
+#ifdef PINT64
+    return num_items < static_cast<uint64_t>(std::numeric_limits<int>::max());
+#else
+    (void) num_items;
+    return true;
+#endif
+}
+
+inline void perfParticlesReportSortState(const char * context, const char * phase, int rank,
+                                         uint64_t num_particles, uint64_t total_capacity,
+                                         uint32_t num_row_buffers, bool use_cub_sort,
+                                         size_t workspace_bytes)
+{
+    size_t free_bytes = 0;
+    size_t total_bytes = 0;
+    cudaError_t mem_status = cudaMemGetInfo(&free_bytes, &total_bytes);
+
+    std::cerr << "perfParticles sort debug: context=" << context
+              << ", phase=" << phase
+              << ", rank=" << rank
+              << ", num_particles=" << num_particles
+              << ", total_capacity=" << total_capacity
+              << ", num_row_buffers=" << num_row_buffers
+              << ", use_cub_sort=" << (use_cub_sort ? 1 : 0)
+              << ", workspace_bytes=" << workspace_bytes;
+
+    if (mem_status == cudaSuccess)
+    {
+        std::cerr << ", cuda_free_bytes=" << free_bytes
+                  << ", cuda_total_bytes=" << total_bytes;
+    }
+    else
+    {
+        std::cerr << ", cudaMemGetInfo_error=" << cudaGetErrorString(mem_status);
+    }
+
+#ifdef FFT3D
+    std::cerr << ", tempMemory_device_allocated=" << tempMemory.device_allocated_
+              << ", tempMemory_current_cap=" << tempMemory.current_cap_;
+#endif
+
+    std::cerr << std::endl;
+}
 
 #ifdef PINT64
 using perfParticleCount = long long int;
@@ -174,7 +232,15 @@ __global__ void update_pointers(perfParticles<part, part_info> * pcl, unsigned l
 template <typename part, typename part_info>
 __global__ void compute_rows(perfParticles<part, part_info> * pcl, uint32_t * row, unsigned long long int starting_idx = 0);
 
+__global__ void initialize_indices(unsigned long long int * indices, unsigned long long int num_particles);
+
 __global__ void compute_row_offsets(const uint32_t * keys, unsigned long long int num_particles, unsigned long long int * offsets, uint32_t num_rows);
+
+__global__ void compute_row_counts(const uint32_t * keys, unsigned long long int num_particles, unsigned long long int * counts, uint32_t num_rows);
+
+__global__ void scatter_indices_by_row(const uint32_t * keys, const unsigned long long int * indices_in, unsigned long long int num_particles, unsigned long long int * row_offsets_work, unsigned long long int * indices_out);
+
+__global__ void fill_row_keys_from_offsets(uint32_t * keys, const unsigned long long int * offsets, uint32_t num_rows);
 
 template <typename T>
 __global__ void reorder_data(unsigned long long int * indices_out, T * data_in, T * data_out, size_t stride, size_t ndata);
@@ -405,7 +471,7 @@ class perfParticles
         // helper function to reorder particles
         void reorderParticles(unsigned long long int * d_indices, void * d_temp, cudaStream_t & stream);
 
-        void acquireTemporaryWorkspace(void ** d_temp, bool * d_temp_private, size_t bytes, cudaStream_t & stream, const char * context);
+        void acquireTemporaryWorkspace(void ** d_temp, bool * d_temp_private, size_t bytes, cudaStream_t & stream, const char * context, bool allow_shrink = false);
         void releaseTemporaryWorkspace(void ** d_temp, bool * d_temp_private, cudaStream_t & stream);
 
         // helper function for particle-mesh projection
@@ -776,8 +842,24 @@ __global__ void compute_rows(perfParticles<part, part_info> * pcl, uint32_t * ro
     }
 }
 
+__global__ void initialize_indices(unsigned long long int * indices, unsigned long long int num_particles)
+{
+#ifdef PINT64
+    unsigned long long int idx =
+        static_cast<unsigned long long int>(blockIdx.x) * static_cast<unsigned long long int>(blockDim.x) +
+        static_cast<unsigned long long int>(threadIdx.x);
+#else
+    unsigned long long int idx = blockIdx.x * blockDim.x + threadIdx.x;
+#endif
+
+    if (idx < num_particles)
+    {
+        indices[idx] = idx;
+    }
+}
+
 // kernel to compute keys for the x-coordinate radix sort
-#ifdef SINGLE
+#if defined(SINGLE) && !defined(PINT64)
 __global__ void compute_xkeys(uint32_t * keys, unsigned long long int * indices, Real * p, unsigned long long int num_particles)
 #else
 __global__ void compute_xkeys(uint64_t * keys, unsigned long long int * indices, Real * p, unsigned long long int num_particles)
@@ -793,8 +875,10 @@ __global__ void compute_xkeys(uint64_t * keys, unsigned long long int * indices,
 
     if (idx < num_particles)
     {
-#ifdef SINGLE
+#if defined(SINGLE) && !defined(PINT64)
         keys[idx] = __float_as_uint(p[3 * indices[idx]]);
+#elif defined(SINGLE) && defined(PINT64)
+        keys[idx] = static_cast<uint64_t>(__float_as_uint(p[3 * indices[idx]]));
 #else
         keys[idx] = static_cast<uint64_t>(__double_as_longlong(p[3 * indices[idx]]));
 #endif
@@ -838,6 +922,61 @@ __global__ void compute_row_offsets(const uint32_t * keys, unsigned long long in
     offsets[row] = left;
 }
 
+__global__ void compute_row_counts(const uint32_t * keys, unsigned long long int num_particles, unsigned long long int * counts, uint32_t num_rows)
+{
+#ifdef PINT64
+    unsigned long long int idx =
+        static_cast<unsigned long long int>(blockIdx.x) * static_cast<unsigned long long int>(blockDim.x) +
+        static_cast<unsigned long long int>(threadIdx.x);
+#else
+    unsigned long long int idx = blockIdx.x * blockDim.x + threadIdx.x;
+#endif
+
+    if (idx < num_particles)
+    {
+        uint32_t row = keys[idx];
+        if (row < num_rows)
+        {
+            atomicAdd(&counts[row + 1], 1ULL);
+        }
+    }
+}
+
+__global__ void scatter_indices_by_row(const uint32_t * keys, const unsigned long long int * indices_in, unsigned long long int num_particles, unsigned long long int * row_offsets_work, unsigned long long int * indices_out)
+{
+#ifdef PINT64
+    unsigned long long int idx =
+        static_cast<unsigned long long int>(blockIdx.x) * static_cast<unsigned long long int>(blockDim.x) +
+        static_cast<unsigned long long int>(threadIdx.x);
+#else
+    unsigned long long int idx = blockIdx.x * blockDim.x + threadIdx.x;
+#endif
+
+    if (idx < num_particles)
+    {
+        uint32_t row = keys[idx];
+        unsigned long long int pos = atomicAdd(&row_offsets_work[row], 1ULL);
+        indices_out[pos] = indices_in[idx];
+    }
+}
+
+__global__ void fill_row_keys_from_offsets(uint32_t * keys, const unsigned long long int * offsets, uint32_t num_rows)
+{
+    uint32_t row = blockIdx.x;
+    if (row >= num_rows)
+    {
+        return;
+    }
+
+    unsigned long long int begin = offsets[row];
+    unsigned long long int end = offsets[row + 1];
+
+    for (unsigned long long int idx = begin + threadIdx.x; idx < end; idx += blockDim.x)
+    {
+        keys[idx] = row;
+    }
+}
+
 // kernel to reorder particle data after radix sort
 template <typename T>
 __global__ void reorder_data(unsigned long long int * indices_out, T * data_in, T * data_out, size_t stride, size_t ndata)
@@ -870,34 +1009,45 @@ size_t perfParticles<part, part_info>::temporaryWorkspaceBytesForParticles(uint6
     if (particle_capacity == 0) return 0;
 
     size_t workspace_bytes = particle_capacity * 3 * sizeof(Real);
-    size_t temp_storage_bytes = 0;
-    uint32_t * keys32 = nullptr;
-    unsigned long long int * indices = nullptr;
+    if (perfParticlesCanUseCubSort(particle_capacity))
+    {
+        size_t temp_storage_bytes = 0;
+        uint32_t * keys32 = nullptr;
+        unsigned long long int * indices = nullptr;
 
-    int comm_end_bit = static_cast<int>(ceil(log2(static_cast<double>(num_row_buffers + 10))));
-    cub::DeviceRadixSort::SortPairs(nullptr, temp_storage_bytes, keys32, keys32, indices, indices, particle_capacity, 0, comm_end_bit);
-    workspace_bytes = std::max(workspace_bytes, temp_storage_bytes);
+        int comm_end_bit = static_cast<int>(ceil(log2(static_cast<double>(num_row_buffers + 10))));
+        perfParticlesThrowOnCudaError(
+            cub::DeviceRadixSort::SortPairs(nullptr, temp_storage_bytes, keys32, keys32, indices, indices, particle_capacity, 0, comm_end_bit),
+            "CUB radix sort temp query for communication");
+        workspace_bytes = std::max(workspace_bytes, temp_storage_bytes);
 
-    temp_storage_bytes = 0;
-    int row_end_bit = (num_row_buffers > 1) ? static_cast<int>(ceil(log2(static_cast<double>(num_row_buffers)))) : 0;
-    cub::DeviceRadixSort::SortPairs(nullptr, temp_storage_bytes, keys32, keys32, indices, indices, particle_capacity, 0, row_end_bit);
-    workspace_bytes = std::max(workspace_bytes, temp_storage_bytes);
+        temp_storage_bytes = 0;
+        int row_end_bit = (num_row_buffers > 1) ? static_cast<int>(ceil(log2(static_cast<double>(num_row_buffers)))) : 0;
+        perfParticlesThrowOnCudaError(
+            cub::DeviceRadixSort::SortPairs(nullptr, temp_storage_bytes, keys32, keys32, indices, indices, particle_capacity, 0, row_end_bit),
+            "CUB radix sort temp query for row sort");
+        workspace_bytes = std::max(workspace_bytes, temp_storage_bytes);
 
-    temp_storage_bytes = 0;
-    unsigned long long int * row_offsets = nullptr;
-#ifdef SINGLE
-    cub::DeviceSegmentedSort::SortPairs(nullptr, temp_storage_bytes, keys32, keys32, indices, indices, particle_capacity, num_row_buffers, row_offsets, row_offsets);
+        temp_storage_bytes = 0;
+        unsigned long long int * row_offsets = nullptr;
+#if defined(SINGLE) && !defined(PINT64)
+        perfParticlesThrowOnCudaError(
+            cub::DeviceSegmentedSort::SortPairs(nullptr, temp_storage_bytes, keys32, keys32, indices, indices, particle_capacity, num_row_buffers, row_offsets, row_offsets),
+            "CUB segmented sort temp query for x sort");
 #else
-    uint64_t * keys64 = nullptr;
-    cub::DeviceSegmentedSort::SortPairs(nullptr, temp_storage_bytes, keys64, keys64, indices, indices, particle_capacity, num_row_buffers, row_offsets, row_offsets);
+        uint64_t * keys64 = nullptr;
+        perfParticlesThrowOnCudaError(
+            cub::DeviceSegmentedSort::SortPairs(nullptr, temp_storage_bytes, keys64, keys64, indices, indices, particle_capacity, num_row_buffers, row_offsets, row_offsets),
+            "CUB segmented sort temp query for x sort");
 #endif
-    workspace_bytes = std::max(workspace_bytes, temp_storage_bytes);
+        workspace_bytes = std::max(workspace_bytes, temp_storage_bytes);
+    }
 
     return workspace_bytes;
 }
 
 template <typename part, typename part_info>
-void perfParticles<part, part_info>::acquireTemporaryWorkspace(void ** d_temp, bool * d_temp_private, size_t bytes, cudaStream_t & stream, const char * context)
+void perfParticles<part, part_info>::acquireTemporaryWorkspace(void ** d_temp, bool * d_temp_private, size_t bytes, cudaStream_t & stream, const char * context, bool allow_shrink)
 {
     if (bytes == 0)
     {
@@ -909,7 +1059,7 @@ void perfParticles<part, part_info>::acquireTemporaryWorkspace(void ** d_temp, b
 
 #ifdef FFT3D
     nvtxRangePushA("perfParticles: acquire shared temporary workspace");
-    tempMemory.reserveDeviceWorkspaceBytes(bytes, context);
+    tempMemory.reserveDeviceWorkspaceBytes(bytes, context, allow_shrink); // allow shrink
     *d_temp = tempMemory.deviceWorkspace();
     *d_temp_private = false;
     nvtxRangePop();
@@ -947,6 +1097,8 @@ void perfParticles<part, part_info>::prepareComm(unsigned long long int * send_b
     unsigned long long int * d_indices_out = nullptr;
     size_t temp_storage_bytes = 0;
     int end_bit = static_cast<int>(ceil(log2(static_cast<double>(num_row_buffers_ + 10))));
+    const bool use_cub_sort = perfParticlesCanUseCubSort(num_particles_);
+    // const bool use_cub_sort = false; // debug
 
     auto success = cudaMallocAsync(&d_indices_in, num_particles_ * sizeof(unsigned long long int) * 2L, stream);
     if (success != cudaSuccess)
@@ -979,21 +1131,99 @@ void perfParticles<part, part_info>::prepareComm(unsigned long long int * send_b
 
     compute_rows<<<(num_particles_+127)/128, 128, 0, stream>>>(this, d_keys_in);
 
-    thrust::sequence(thrust::cuda::par.on(stream), d_indices_in, d_indices_in + num_particles_, 0);
+    initialize_indices<<<(num_particles_+127)/128, 128, 0, stream>>>(d_indices_in, num_particles_);
 
     nvtxRangePop();
 
     // radix sort
     nvtxRangePushA("prepareComm: radix sort");
+    if (use_cub_sort)
+    {
     // get temporary storage
-    cub::DeviceRadixSort::SortPairs(nullptr, temp_storage_bytes, d_keys_in, *d_keys, d_indices_in, d_indices_out, num_particles_, 0, end_bit, stream);
+        perfParticlesThrowOnCudaError(
+            cub::DeviceRadixSort::SortPairs(nullptr, temp_storage_bytes, d_keys_in, *d_keys, d_indices_in, d_indices_out, num_particles_, 0, end_bit, stream),
+            "CUB radix sort temp query in prepareComm");
 
-    temp_storage_bytes = std::max(temp_storage_bytes, num_particles_ * 3 * sizeof(Real));
+        temp_storage_bytes = std::max(temp_storage_bytes, num_particles_ * 3 * sizeof(Real));
 
-    acquireTemporaryWorkspace(d_temp, d_temp_private, temp_storage_bytes, stream, "perfParticles::prepareComm");
+        acquireTemporaryWorkspace(d_temp, d_temp_private, temp_storage_bytes, stream, "perfParticles::prepareComm");
 
-    // sort
-    cub::DeviceRadixSort::SortPairs(*d_temp, temp_storage_bytes, d_keys_in, *d_keys, d_indices_in, d_indices_out, num_particles_, 0, end_bit, stream);
+        // sort
+        perfParticlesThrowOnCudaError(
+            cub::DeviceRadixSort::SortPairs(*d_temp, temp_storage_bytes, d_keys_in, *d_keys, d_indices_in, d_indices_out, num_particles_, 0, end_bit, stream),
+            "CUB radix sort execution in prepareComm");
+    }
+    else
+    {
+        const uint32_t num_prepare_classes = num_row_buffers_ + 9;
+        unsigned long long int * d_row_offsets = nullptr;
+        unsigned long long int * d_row_offsets_work = nullptr;
+        std::vector<unsigned long long int> h_row_offsets(num_prepare_classes + 1, 0);
+
+        success = cudaMallocAsync((void **) & d_row_offsets, (num_prepare_classes + 1) * sizeof(unsigned long long int), stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error in CUDA malloc for d_row_offsets in prepareComm");
+        }
+
+        success = cudaMallocAsync((void **) & d_row_offsets_work, (num_prepare_classes + 1) * sizeof(unsigned long long int), stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error in CUDA malloc for d_row_offsets_work in prepareComm");
+        }
+
+        success = cudaMemsetAsync(d_row_offsets, 0, (num_prepare_classes + 1) * sizeof(unsigned long long int), stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA memset failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error zeroing d_row_offsets in prepareComm");
+        }
+
+        compute_row_counts<<<(num_particles_+127)/128, 128, 0, stream>>>(d_keys_in, num_particles_, d_row_offsets, num_prepare_classes);
+
+        success = cudaMemcpyAsync(h_row_offsets.data(), d_row_offsets, (num_prepare_classes + 1) * sizeof(unsigned long long int), cudaMemcpyDeviceToHost, stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA memcpy failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error copying row counts in prepareComm");
+        }
+        success = cudaStreamSynchronize(stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA stream sync failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error synchronizing row counts in prepareComm");
+        }
+
+        for (uint32_t row = 1; row <= num_prepare_classes; row++)
+        {
+            h_row_offsets[row] += h_row_offsets[row - 1];
+        }
+
+        success = cudaMemcpyAsync(d_row_offsets, h_row_offsets.data(), (num_prepare_classes + 1) * sizeof(unsigned long long int), cudaMemcpyHostToDevice, stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA memcpy failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error copying row offsets in prepareComm");
+        }
+
+        success = cudaMemcpyAsync(d_row_offsets_work, h_row_offsets.data(), (num_prepare_classes + 1) * sizeof(unsigned long long int), cudaMemcpyHostToDevice, stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA memcpy failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error copying row offsets work array in prepareComm");
+        }
+
+        scatter_indices_by_row<<<(num_particles_+127)/128, 128, 0, stream>>>(d_keys_in, d_indices_in, num_particles_, d_row_offsets_work, d_indices_out);
+
+        fill_row_keys_from_offsets<<<num_prepare_classes, 128, 0, stream>>>(*d_keys, d_row_offsets, num_prepare_classes);
+
+        acquireTemporaryWorkspace(d_temp, d_temp_private, num_particles_ * 3 * sizeof(Real), stream, "perfParticles::prepareComm");
+
+        cudaFreeAsync(d_row_offsets_work, stream);
+        cudaFreeAsync(d_row_offsets, stream);
+    }
     nvtxRangePop();
 
     cudaFreeAsync(d_keys_in, stream);
@@ -1021,85 +1251,252 @@ void perfParticles<part, part_info>::prepareComm(unsigned long long int * send_b
 template <typename part, typename part_info>
 void perfParticles<part, part_info>::computeSortIndices(uint32_t * d_keys, unsigned long long int * d_indices, void ** d_temp, bool * d_temp_private, cudaStream_t & stream)
 {
-    uint32_t * d_keys_out;
+    uint32_t * d_keys_out = nullptr;
     unsigned long long int * d_indices_out;
     unsigned long long int * row_offsets;
-#ifdef SINGLE
-    uint32_t * d_xkeys_in;
-    uint32_t * d_xkeys_out;
+#if defined(SINGLE) && !defined(PINT64)
+    uint32_t * d_xkeys_in = nullptr;
+    uint32_t * d_xkeys_out = nullptr;
 #else
-    uint64_t * d_xkeys_in;
-    uint64_t * d_xkeys_out;
+    uint64_t * d_xkeys_in = nullptr;
+    uint64_t * d_xkeys_out = nullptr;
 #endif
     size_t temp_storage_bytes = 0;
     size_t temp_storage_bytes2 = 0;
     int end_bit = static_cast<int>(ceil(log2(static_cast<double>(num_row_buffers_))));
+    const bool use_cub_sort = perfParticlesCanUseCubSort(num_particles_);
+    // const bool use_cub_sort = false; // debug
 
-    auto success = cudaMallocAsync(&d_keys_out, num_particles_ * sizeof(uint32_t), stream);
-    if (success != cudaSuccess)
-    {
-        std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
-        throw std::runtime_error("Error in CUDA malloc for d_keys_out");
-    }
+    auto success = cudaSuccess;
 
     d_indices_out = d_indices + num_particles_;
 
-    thrust::sequence(thrust::cuda::par.on(stream), d_indices, d_indices + num_particles_, 0);
-    cub::DeviceRadixSort::SortPairs(nullptr, temp_storage_bytes, d_keys, d_keys_out, d_indices, d_indices_out, num_particles_, 0, end_bit, stream);
-    temp_storage_bytes = std::max(temp_storage_bytes, num_particles_ * 3 * sizeof(Real));
+    if (use_cub_sort)
+    {
+        success = cudaMallocAsync(&d_keys_out, num_particles_ * sizeof(uint32_t), stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error in CUDA malloc for d_keys_out");
+        }
 
-    unsigned long long int * row_offsets_query = nullptr;
-#ifdef SINGLE
-    uint32_t * xkeys_query = nullptr;
+        initialize_indices<<<(num_particles_+127)/128, 128, 0, stream>>>(d_indices, num_particles_);
+        perfParticlesThrowOnCudaError(
+            cub::DeviceRadixSort::SortPairs(nullptr, temp_storage_bytes, d_keys, d_keys_out, d_indices, d_indices_out, num_particles_, 0, end_bit, stream),
+            "CUB radix sort temp query in computeSortIndices");
+        temp_storage_bytes = std::max(temp_storage_bytes, num_particles_ * 3 * sizeof(Real));
+
+        unsigned long long int * row_offsets_query = nullptr;
+#if defined(SINGLE) && !defined(PINT64)
+        uint32_t * xkeys_query = nullptr;
 #else
-    uint64_t * xkeys_query = nullptr;
+        uint64_t * xkeys_query = nullptr;
 #endif
-    cub::DeviceSegmentedSort::SortPairs(nullptr, temp_storage_bytes2, xkeys_query, xkeys_query, d_indices_out, d_indices, num_particles_, num_row_buffers_, row_offsets_query, row_offsets_query, stream);
-    temp_storage_bytes = std::max(temp_storage_bytes, temp_storage_bytes2);
+        perfParticlesThrowOnCudaError(
+            cub::DeviceSegmentedSort::SortPairs(nullptr, temp_storage_bytes2, xkeys_query, xkeys_query, d_indices_out, d_indices, num_particles_, num_row_buffers_, row_offsets_query, row_offsets_query, stream),
+            "CUB segmented sort temp query in computeSortIndices");
+        temp_storage_bytes = std::max(temp_storage_bytes, temp_storage_bytes2);
 
-    acquireTemporaryWorkspace(d_temp, d_temp_private, temp_storage_bytes, stream, "perfParticles::computeSortIndices");
+        acquireTemporaryWorkspace(d_temp, d_temp_private, temp_storage_bytes, stream, "perfParticles::computeSortIndices"); 
 
-    // sort by row key
-    cub::DeviceRadixSort::SortPairs(*d_temp, temp_storage_bytes, d_keys, d_keys_out, d_indices, d_indices_out, num_particles_, 0, end_bit, stream);
+        // sort by row key
+        perfParticlesThrowOnCudaError(
+            cub::DeviceRadixSort::SortPairs(*d_temp, temp_storage_bytes, d_keys, d_keys_out, d_indices, d_indices_out, num_particles_, 0, end_bit, stream),
+            "CUB radix sort execution in computeSortIndices");
 
-    success = cudaMallocAsync((void **) & row_offsets, (num_row_buffers_+1) * sizeof(unsigned long long int), stream);
-    if (success != cudaSuccess)
-    {
-        std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
-        throw std::runtime_error("Error in CUDA malloc for row_offsets");
-    }
+        success = cudaMallocAsync((void **) & row_offsets, (num_row_buffers_+1) * sizeof(unsigned long long int), stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error in CUDA malloc for row_offsets");
+        }
 
-    // compute row offsets
-    compute_row_offsets<<<(num_row_buffers_+1+127)/128, 128, 0, stream>>>(d_keys_out, num_particles_, row_offsets, num_row_buffers_);
+        // compute row offsets
+        compute_row_offsets<<<(num_row_buffers_+1+127)/128, 128, 0, stream>>>(d_keys_out, num_particles_, row_offsets, num_row_buffers_);
 
-#ifdef SINGLE
-    d_xkeys_in = d_keys;
-    d_xkeys_out = d_keys_out;
+#if defined(SINGLE) && !defined(PINT64)
+        d_xkeys_in = d_keys;
+        d_xkeys_out = d_keys_out;
 #else
-    cudaFreeAsync(d_keys, stream);
-    cudaFreeAsync(d_keys_out, stream);
-    success = cudaMallocAsync((void **) & d_xkeys_in, num_particles_ * sizeof(uint64_t), stream);
-    if (success != cudaSuccess)
-    {
-        std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
-        throw std::runtime_error("Error in CUDA malloc for d_xkeys_in");
-    }
-    success = cudaMallocAsync((void **) & d_xkeys_out, num_particles_ * sizeof(uint64_t), stream);
-    if (success != cudaSuccess)
-    {
-        std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
-        throw std::runtime_error("Error in CUDA malloc for d_xkeys_out");
-    }
+        cudaFreeAsync(d_keys, stream);
+        cudaFreeAsync(d_keys_out, stream);
+        success = cudaMallocAsync((void **) & d_xkeys_in, num_particles_ * sizeof(uint64_t), stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error in CUDA malloc for d_xkeys_in");
+        }
+        success = cudaMallocAsync((void **) & d_xkeys_out, num_particles_ * sizeof(uint64_t), stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error in CUDA malloc for d_xkeys_out");
+        }
 #endif
 
-    // generate keys for x-ordering
-    compute_xkeys<<<(num_particles_+127)/128, 128, 0, stream>>>(d_xkeys_in, d_indices_out, p, num_particles_);
+        // generate keys for x-ordering
+        compute_xkeys<<<(num_particles_+127)/128, 128, 0, stream>>>(d_xkeys_in, d_indices_out, p, num_particles_);
 
-    // sort by x-keys
-    cub::DeviceSegmentedSort::SortPairs(*d_temp, temp_storage_bytes2, d_xkeys_in, d_xkeys_out, d_indices_out, d_indices, num_particles_, num_row_buffers_, row_offsets, row_offsets+1, stream);
-    cudaFreeAsync(d_xkeys_in, stream);
-    cudaFreeAsync(d_xkeys_out, stream);
-    cudaFreeAsync(row_offsets, stream);
+        // sort by x-keys
+        perfParticlesThrowOnCudaError(
+            cub::DeviceSegmentedSort::SortPairs(*d_temp, temp_storage_bytes2, d_xkeys_in, d_xkeys_out, d_indices_out, d_indices, num_particles_, num_row_buffers_, row_offsets, row_offsets+1, stream),
+            "CUB segmented sort execution in computeSortIndices");
+        cudaFreeAsync(d_xkeys_in, stream);
+        cudaFreeAsync(d_xkeys_out, stream);
+        cudaFreeAsync(row_offsets, stream);
+    }
+    else
+    {
+        initialize_indices<<<(num_particles_+127)/128, 128, 0, stream>>>(d_indices, num_particles_);
+        row_offsets = nullptr;
+        unsigned long long int * row_offsets_work = nullptr;
+        std::vector<unsigned long long int> h_row_offsets(num_row_buffers_ + 1, 0);
+
+        success = cudaMallocAsync((void **) & row_offsets, (num_row_buffers_ + 1) * sizeof(unsigned long long int), stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error in CUDA malloc for row_offsets in computeSortIndices");
+        }
+
+        success = cudaMallocAsync((void **) & row_offsets_work, (num_row_buffers_ + 1) * sizeof(unsigned long long int), stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error in CUDA malloc for row_offsets_work in computeSortIndices");
+        }
+
+        success = cudaMemsetAsync(row_offsets, 0, (num_row_buffers_ + 1) * sizeof(unsigned long long int), stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA memset failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error zeroing row_offsets in computeSortIndices");
+        }
+
+        compute_row_counts<<<(num_particles_+127)/128, 128, 0, stream>>>(d_keys, num_particles_, row_offsets, num_row_buffers_);
+
+        success = cudaMemcpyAsync(h_row_offsets.data(), row_offsets, (num_row_buffers_ + 1) * sizeof(unsigned long long int), cudaMemcpyDeviceToHost, stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA memcpy failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error copying row counts in computeSortIndices");
+        }
+        success = cudaStreamSynchronize(stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA stream sync failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error synchronizing row counts in computeSortIndices");
+        }
+
+        unsigned long long int max_row_count = 0;
+        for (uint32_t row = 1; row <= num_row_buffers_; row++)
+        {
+            h_row_offsets[row] += h_row_offsets[row - 1];
+            max_row_count = std::max(max_row_count, h_row_offsets[row] - h_row_offsets[row - 1]);
+        }
+
+        if (max_row_count > static_cast<unsigned long long int>(std::numeric_limits<int>::max()))
+        {
+            for (uint32_t row = 0; row < num_row_buffers_; row++)
+            {
+                unsigned long long int row_count = h_row_offsets[row + 1] - h_row_offsets[row];
+                if (row_count > static_cast<unsigned long long int>(std::numeric_limits<int>::max()))
+                {
+                    std::cerr << "perfParticles::computeSortIndices large-row overflow: rank=" << parallel.rank()
+                              << ", row=" << row
+                              << ", row_count=" << row_count
+                              << ", int_max=" << std::numeric_limits<int>::max() << std::endl;
+                    break;
+                }
+            }
+            throw std::runtime_error("Row count exceeds INT_MAX in computeSortIndices");
+        }
+
+        success = cudaMemcpyAsync(row_offsets, h_row_offsets.data(), (num_row_buffers_ + 1) * sizeof(unsigned long long int), cudaMemcpyHostToDevice, stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA memcpy failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error copying row offsets in computeSortIndices");
+        }
+
+        success = cudaMemcpyAsync(row_offsets_work, h_row_offsets.data(), (num_row_buffers_ + 1) * sizeof(unsigned long long int), cudaMemcpyHostToDevice, stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA memcpy failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error copying row offsets work array in computeSortIndices");
+        }
+
+        scatter_indices_by_row<<<(num_particles_+127)/128, 128, 0, stream>>>(d_keys, d_indices, num_particles_, row_offsets_work, d_indices_out);
+
+        size_t fallback_workspace_bytes = num_particles_ * 3 * sizeof(Real);
+        if (max_row_count > 1)
+        {
+#if defined(SINGLE) && !defined(PINT64)
+            uint32_t * xkeys_query = nullptr;
+#else
+            uint64_t * xkeys_query = nullptr;
+#endif
+            unsigned long long int * indices_query = nullptr;
+            perfParticlesThrowOnCudaError(
+                cub::DeviceRadixSort::SortPairs(nullptr, temp_storage_bytes2, xkeys_query, xkeys_query,
+                                                indices_query, indices_query, static_cast<int>(max_row_count),
+                                                0, static_cast<int>(8 * sizeof(*xkeys_query)), stream),
+                "CUB radix sort temp query in computeSortIndices row fallback");
+            fallback_workspace_bytes = std::max(fallback_workspace_bytes, temp_storage_bytes2);
+        }
+
+        acquireTemporaryWorkspace(d_temp, d_temp_private, fallback_workspace_bytes, stream, "perfParticles::computeSortIndices");
+        perfParticlesReportSortState("perfParticles::computeSortIndices", "row-by-row cub fallback entry", parallel.rank(),
+                                     num_particles_, total_capacity_, num_row_buffers_, use_cub_sort, fallback_workspace_bytes);
+
+        success = cudaMemcpyAsync(d_indices, d_indices_out, num_particles_ * sizeof(unsigned long long int), cudaMemcpyDeviceToDevice, stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA memcpy failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error copying grouped indices in computeSortIndices");
+        }
+
+        if (max_row_count > 1)
+        {
+            success = cudaMallocAsync((void **) & d_xkeys_in, max_row_count * sizeof(*d_xkeys_in), stream);
+            if (success != cudaSuccess)
+            {
+                std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+                throw std::runtime_error("Error in CUDA malloc for d_xkeys_in");
+            }
+            success = cudaMallocAsync((void **) & d_xkeys_out, max_row_count * sizeof(*d_xkeys_out), stream);
+            if (success != cudaSuccess)
+            {
+                std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+                throw std::runtime_error("Error in CUDA malloc for d_xkeys_out");
+            }
+
+            for (uint32_t row = 0; row < num_row_buffers_; row++)
+            {
+                unsigned long long int row_begin = h_row_offsets[row];
+                unsigned long long int row_count = h_row_offsets[row + 1] - row_begin;
+                if (row_count <= 1)
+                {
+                    continue;
+                }
+
+                compute_xkeys<<<(row_count+127)/128, 128, 0, stream>>>(d_xkeys_in, d_indices_out + row_begin, p, row_count);
+                perfParticlesThrowOnCudaError(
+                    cub::DeviceRadixSort::SortPairs(*d_temp, temp_storage_bytes2, d_xkeys_in, d_xkeys_out,
+                                                    d_indices_out + row_begin, d_indices + row_begin,
+                                                    static_cast<int>(row_count), 0,
+                                                    static_cast<int>(8 * sizeof(*d_xkeys_in)), stream),
+                    "CUB radix sort execution in computeSortIndices row fallback");
+            }
+
+            cudaFreeAsync(d_xkeys_in, stream);
+            cudaFreeAsync(d_xkeys_out, stream);
+        }
+
+        cudaFreeAsync(row_offsets_work, stream);
+        cudaFreeAsync(row_offsets, stream);
+        cudaFreeAsync(d_keys, stream);
+    }
 }
 
 // reorder particles
@@ -1641,6 +2038,7 @@ template <typename UpdateFunct>
 void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int * reduce_type, int noutput, void ** vparams)
 {
     nvtxRangePushA("moveParticles");
+    // cudaSetDevice(0); // NB: this is debug!! 
 
     unsigned long long int send_begin[10];
     unsigned long long int * d_send_begin;
@@ -1886,8 +2284,9 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
 #endif
 
         nvtxRangePushA("moveParticles: CUDA-aware particle device workspace");
+        cudaError_t workspace_success;
         acquireTemporaryWorkspace(&comm_workspace, &comm_workspace_private, workspace_bytes, comm_stream, "perfParticles::moveParticles");
-        auto workspace_success = cudaStreamSynchronize(comm_stream);
+        workspace_success = cudaStreamSynchronize(comm_stream);
         if (workspace_success != cudaSuccess)
         {
             nvtxRangePop();
@@ -2183,7 +2582,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
             {
                 extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[1] + extra_capacity_);
             }
-            
+
             parallel.receive_dim1(extra_buffer_[4].p, 3*buffer_sizes[1], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[4].q, 3*buffer_sizes[1], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
             parallel.receive_dim1(extra_buffer_[4].other, buffer_sizes[1], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);

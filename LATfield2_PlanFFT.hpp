@@ -19,12 +19,15 @@
  		temporaryMemFFT(long size);
 
  		int setTemp(long size);
-		int reserveDeviceWorkspaceBytes(size_t bytes, const char* context = nullptr);
+		int reserveDeviceWorkspaceBytes(size_t bytes, const char* context = nullptr, bool allow_shrink = false);
     	void clear();
 		long allocated(){return allocated_;}
 		size_t deviceAllocated(){return device_allocated_;}
 		size_t deviceWorkspaceBytes();
 		void * deviceWorkspace();
+		size_t minimum_size_;
+		size_t current_cap_;
+		size_t device_allocated_; //number of complex values in each logical device buffer
 
  #ifdef SINGLE
  		fftwf_complex* temp1(){return temp1_;}
@@ -41,6 +44,8 @@
 	cufftDoubleComplex * temp4(){return temp4_;}
     cufftDoubleComplex * temp5(){return temp5_;}
  #endif
+	// made public for shrinking in main loop
+	int reserveDeviceComplexCapacity(size_t capacity, const char* context, bool allow_shrink = false);
 
  	private:
 #ifdef SINGLE
@@ -61,11 +66,9 @@
     cufftDoubleComplex * temp5_;
 #endif
  		long allocated_; //number of variable stored (bit = allocated*sizeof(fftw(f)_complex))
-		size_t device_allocated_; //number of complex values in each logical device buffer
 		bool is_managed;
 
 		size_t deviceComplexBytes();
-		int reserveDeviceComplexCapacity(size_t capacity, const char* context);
 		void updateDeviceBufferPointers();
 		void warnDeviceWorkspaceGrowth(size_t old_bytes, size_t new_bytes, const char* context);
  	};
@@ -89,7 +92,9 @@ temporaryMemFFT::temporaryMemFFT(bool managed)
 	temp5_=nullptr;
 	allocated_=0;
 	device_allocated_=0;
+	minimum_size_ = 0;
 	is_managed = managed;
+	current_cap_ = 0;
 }
 temporaryMemFFT::~temporaryMemFFT()
 {
@@ -105,6 +110,8 @@ temporaryMemFFT::temporaryMemFFT(long size)
 	temp5_=nullptr;
 	allocated_=0;
 	device_allocated_=0;
+	minimum_size_ = 0;
+	current_cap_ = 0;
 	setTemp(size);
 }
 
@@ -157,13 +164,33 @@ void temporaryMemFFT::warnDeviceWorkspaceGrowth(size_t old_bytes, size_t new_byt
 	{
 		std::cerr << "LATfield2 temporary device workspace growth during " << context
 		          << " (old=" << old_bytes << " bytes, new=" << new_bytes
-		          << " bytes). Consider preallocating a larger shared workspace." << std::endl;
+		          << " bytes). "<< std::endl;
+				//   Consider preallocating a larger shared workspace." << std::endl;
 	}
 }
 
-int temporaryMemFFT::reserveDeviceComplexCapacity(size_t capacity, const char* context)
+int temporaryMemFFT::reserveDeviceComplexCapacity(size_t capacity, const char* context, bool allow_shrink)
 {
-	if (capacity <= device_allocated_) return 1;
+	current_cap_ = std::max(current_cap_, capacity);
+	if (capacity <= device_allocated_)
+	{
+    	if ( 
+#ifdef FREETEMPPERCENT
+			!allow_shrink || (capacity * 100 > device_allocated_ * (size_t) (100 - FREETEMPPERCENT))
+#else
+			true
+#endif
+			)
+			return 1;
+		else
+		{
+			// the below will run and reallocate memory to a smaller size
+			std::cerr << "Shrinking device workspace capacity from " << device_allocated_ << " to " << capacity
+			          << " complex values " << std::endl;
+			// size_t minimum_capacity = ...;// previous was wrong – but don't use now anyway
+			// capacity = std::max(capacity, minimum_capacity);
+		}
+	}
 
 	size_t old_bytes = deviceWorkspaceBytes();
 	size_t new_bytes = 3 * capacity * deviceComplexBytes();
@@ -184,6 +211,16 @@ int temporaryMemFFT::reserveDeviceComplexCapacity(size_t capacity, const char* c
 	if (success != cudaSuccess)
 	{
 		std::cerr << "cudaMalloc failed: " << cudaGetErrorString(success) << std::endl;
+		std::cerr << "temporaryMemFFT::reserveDeviceComplexCapacity failure details: "
+		          << "requested_capacity=" << capacity
+		          << ", requested_bytes=" << new_bytes
+		          << ", current_cap_=" << current_cap_
+		          << ", device_allocated_=" << device_allocated_
+		          << ", minimum_size_=" << minimum_size_
+		          << ", deviceComplexBytes()=" << deviceComplexBytes()
+		          << ", allow_shrink=" << allow_shrink
+		          << ", context=" << (context != nullptr ? context : "(null)")
+		          << std::endl;
 		device_block_ = nullptr;
 		device_allocated_ = 0;
 		updateDeviceBufferPointers();
@@ -196,13 +233,13 @@ int temporaryMemFFT::reserveDeviceComplexCapacity(size_t capacity, const char* c
 	return 1;
 }
 
-int temporaryMemFFT::reserveDeviceWorkspaceBytes(size_t bytes, const char* context)
+int temporaryMemFFT::reserveDeviceWorkspaceBytes(size_t bytes, const char* context, bool allow_shrink)
 {
 	if (bytes == 0) return 1;
 
 	size_t per_buffer_bytes = 3 * deviceComplexBytes();
 	size_t required_capacity = (bytes + per_buffer_bytes - 1) / per_buffer_bytes;
-	return reserveDeviceComplexCapacity(required_capacity, context);
+	return reserveDeviceComplexCapacity(required_capacity, context, allow_shrink);
 }
 
 int temporaryMemFFT::setTemp(long size)
