@@ -1208,7 +1208,7 @@ long PlanFFT<compType>::requiredTemporaryCapacity() const
 template<class compType>
 void PlanFFT<compType>::preallocate(size_t min_shared_device_workspace_bytes)
 {
-  tempMemory.minimum_size_ = 0;// min_shared_device_workspace_bytes;
+  tempMemory.minimum_size_ = std::max(tempMemory.minimum_size_, (size_t) requiredTemporaryCapacity());
   tempMemory.setTemp(requiredTemporaryCapacity());
   tempMemory.reserveDeviceWorkspaceBytes(min_shared_device_workspace_bytes);
 }

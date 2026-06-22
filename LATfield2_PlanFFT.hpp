@@ -171,6 +171,7 @@ void temporaryMemFFT::warnDeviceWorkspaceGrowth(size_t old_bytes, size_t new_byt
 
 int temporaryMemFFT::reserveDeviceComplexCapacity(size_t capacity, const char* context, bool allow_shrink)
 {
+	capacity = std::max(capacity, minimum_size_);
 	current_cap_ = std::max(current_cap_, capacity);
 	if (capacity <= device_allocated_)
 	{

@@ -1100,6 +1100,14 @@ void perfParticles<part, part_info>::prepareComm(unsigned long long int * send_b
     const bool use_cub_sort = perfParticlesCanUseCubSort(num_particles_);
     // const bool use_cub_sort = false; // debug
 
+    // Skip the sort/reorder entirely when this rank holds no particles: the
+    // per-particle kernels below launch with (num_particles_+127)/128 == 0 blocks
+    // (cudaErrorInvalidConfiguration) when num_particles_ == 0. update_pointers
+    // below still runs and produces the correct (empty) send_begin offsets. A rank
+    // can legitimately be empty, e.g. when reading domain-decomposed multi-file
+    // Gadget2 snapshots (hibernation restart).
+    if (num_particles_ > 0)
+    {
     auto success = cudaMallocAsync(&d_indices_in, num_particles_ * sizeof(unsigned long long int) * 2L, stream);
     if (success != cudaSuccess)
     {
@@ -1231,6 +1239,7 @@ void perfParticles<part, part_info>::prepareComm(unsigned long long int * send_b
     reorderParticles(d_indices_out, *d_temp, stream);
 
     cudaFreeAsync(d_indices_in, stream);
+    } // end if (num_particles_ > 0)
 
     nvtxRangePushA("prepareComm: update pointers");
 
@@ -1599,28 +1608,37 @@ void perfParticles<part, part_info>::updateRowBuffers(unsigned long long int * s
         return row_a < row_b;
     });
 #else
-    success = cudaMallocAsync(&d_keys_in, num_particles_ * sizeof(uint32_t), pcl_stream);
-    if (success != cudaSuccess)
+    // Only sort if this rank actually holds particles: launching a kernel with
+    // (num_particles_+127)/128 == 0 blocks (i.e. num_particles_ == 0) is an
+    // invalid launch configuration (cudaErrorInvalidConfiguration). A rank can
+    // legitimately end up with zero particles, e.g. when reading domain-decomposed
+    // multi-file Gadget2 snapshots (hibernation restart). update_pointers below
+    // still runs and sets up the (empty) row structure correctly.
+    if (num_particles_ > 0)
     {
-        std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
-        throw std::runtime_error("Error in CUDA malloc for d_keys_in");
+        success = cudaMallocAsync(&d_keys_in, num_particles_ * sizeof(uint32_t), pcl_stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error in CUDA malloc for d_keys_in");
+        }
+
+        success = cudaMallocAsync(&d_indices, num_particles_ * sizeof(unsigned long long int) * 2L, pcl_stream);
+        if (success != cudaSuccess)
+        {
+            std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+            throw std::runtime_error("Error in CUDA malloc for d_indices");
+        }
+
+        compute_rows<<<(num_particles_+127)/128, 128, 0, pcl_stream>>>(this, d_keys_in);
+
+        computeSortIndices(d_keys_in, d_indices, &d_temp, &d_temp_private, pcl_stream);
+
+        reorderParticles(d_indices, d_temp, pcl_stream);
+
+        releaseTemporaryWorkspace(&d_temp, &d_temp_private, pcl_stream);
+        cudaFreeAsync(d_indices, pcl_stream);
     }
-
-    success = cudaMallocAsync(&d_indices, num_particles_ * sizeof(unsigned long long int) * 2L, pcl_stream);
-    if (success != cudaSuccess)
-    {
-        std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
-        throw std::runtime_error("Error in CUDA malloc for d_indices");
-    }
-
-    compute_rows<<<(num_particles_+127)/128, 128, 0, pcl_stream>>>(this, d_keys_in);
-
-    computeSortIndices(d_keys_in, d_indices, &d_temp, &d_temp_private, pcl_stream);
-
-    reorderParticles(d_indices, d_temp, pcl_stream);
-
-    releaseTemporaryWorkspace(&d_temp, &d_temp_private, pcl_stream);
-    cudaFreeAsync(d_indices, pcl_stream);
 
     success = cudaStreamSynchronize(pcl_stream);
     if (success != cudaSuccess)
