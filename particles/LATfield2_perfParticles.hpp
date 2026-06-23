@@ -230,7 +230,7 @@ template <typename part, typename part_info>
 __global__ void update_pointers(perfParticles<part, part_info> * pcl, unsigned long long int * send_begin);
 
 template <typename part, typename part_info>
-__global__ void compute_rows(perfParticles<part, part_info> * pcl, uint32_t * row, unsigned long long int starting_idx = 0);
+__global__ void compute_rows(perfParticles<part, part_info> * pcl, uint32_t * row, unsigned long long int starting_idx = 0, bool check_local = false);
 
 __global__ void initialize_indices(unsigned long long int * indices, unsigned long long int num_particles);
 
@@ -490,7 +490,7 @@ class perfParticles
         friend __global__ void update_pointers(perfParticles<part2, part_info2> * pcl, unsigned long long int * send_begin);
 
         template <typename part2, typename part_info2>
-        friend __global__ void compute_rows(perfParticles<part2, part_info2> * pcl, uint32_t * row, unsigned long long int starting_idx);
+        friend __global__ void compute_rows(perfParticles<part2, part_info2> * pcl, uint32_t * row, unsigned long long int starting_idx, bool check_local);
 
         template <typename part2, typename part_info2, typename UpdateFunct>
         friend __global__ void update_particles(perfParticles<part2, part_info2> * pcl, UpdateFunct update_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int * reduce_type, int noutput, Real * v2, bool copyout, void ** vparams);
@@ -826,7 +826,7 @@ __global__ void update_pointers(perfParticles<part, part_info> * pcl, unsigned l
 
 // kernel to compute rows for radix sort
 template <typename part, typename part_info>
-__global__ void compute_rows(perfParticles<part, part_info> * pcl, uint32_t * row, unsigned long long int starting_idx)
+__global__ void compute_rows(perfParticles<part, part_info> * pcl, uint32_t * row, unsigned long long int starting_idx, bool check_local)
 {
 #ifdef PINT64
     unsigned long long int idx =
@@ -838,7 +838,14 @@ __global__ void compute_rows(perfParticles<part, part_info> * pcl, uint32_t * ro
 
     if (idx < pcl->num_particles_)
     {
-        row[idx] = static_cast<uint32_t>(pcl->computeRow(pcl->p[3*idx+1], pcl->p[3*idx+2]));
+        uint32_t r = static_cast<uint32_t>(pcl->computeRow(pcl->p[3*idx+1], pcl->p[3*idx+2]));
+        if (check_local && r >= pcl->num_row_buffers_)
+        {
+            printf("compute_rows: out-of-domain row %u >= %u at particle %llu (pos %g %g)\n",
+                   r, pcl->num_row_buffers_, idx, (double) pcl->p[3*idx+1], (double) pcl->p[3*idx+2]);
+            __trap();
+        }
+        row[idx] = r;
     }
 }
 
@@ -1630,7 +1637,7 @@ void perfParticles<part, part_info>::updateRowBuffers(unsigned long long int * s
             throw std::runtime_error("Error in CUDA malloc for d_indices");
         }
 
-        compute_rows<<<(num_particles_+127)/128, 128, 0, pcl_stream>>>(this, d_keys_in);
+        compute_rows<<<(num_particles_+127)/128, 128, 0, pcl_stream>>>(this, d_keys_in, 0, true);
 
         computeSortIndices(d_keys_in, d_indices, &d_temp, &d_temp_private, pcl_stream);
 
@@ -3027,7 +3034,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
     }
 
     if (num_particles_ > start_num_particles)
-        compute_rows<<<(num_particles_-start_num_particles+127)/128, 128, 0, pcl_stream>>>(this, d_keys, start_num_particles);
+        compute_rows<<<(num_particles_-start_num_particles+127)/128, 128, 0, pcl_stream>>>(this, d_keys, start_num_particles, true);
 
     nvtxRangePop();
 
