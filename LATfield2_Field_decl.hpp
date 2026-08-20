@@ -786,21 +786,18 @@ void Field<FieldType>::alloc(long size, int alloc_type)
 {
 	if (alloc_type == device || alloc_type == managed)
 	{
-		if (status_ & allocated && (alloc_type_ == host || size > lattice_->sitesLocalGross()))
+		unsigned long long requested_memSize = ((size < lattice_->sitesLocalGross()) ? lattice_->sitesLocalGross() : size) * components_;
+
+		if (status_ & allocated)
 		{
+			if (alloc_type_ == alloc_type && data_memSize_ >= requested_memSize)
+				return;
 			this->dealloc();
 			this->alloc(size, alloc_type);
 			return;
 		}
 
-		if (size < lattice_->sitesLocalGross())
-		{
-			data_memSize_ = lattice_->sitesLocalGross() * components_;
-		}
-		else
-		{
-			data_memSize_ = size * components_;
-		}
+		data_memSize_ = requested_memSize;
 
 		auto success = (alloc_type == device) ? cudaMalloc((void**)&data_, data_memSize_ * sizeof(FieldType)) : cudaMallocManaged((void**)&data_, data_memSize_ * sizeof(FieldType));
 
