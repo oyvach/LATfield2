@@ -356,7 +356,29 @@ Parallel2d::~Parallel2d()
 
 void Parallel2d::abortForce()
 {
+	// make sure the error message reaches the log before the process dies
+	cout.flush();
+	cerr.flush();
+	fflush(NULL);
+
+	// MPI_Abort may terminate via exit(), which runs static destructors;
+	// ~Parallel2d() must then not call the collective MPI_Finalize(), which hangs
+	neverFinalizeMPI = true;
+
+	// watchdog: if MPI_Abort (or the exit handlers it triggers, e.g. CUDA teardown)
+	// hangs, SIGALRM with its default action kills this process after 10 s, so that
+	// Slurm sees a failed task and tears down the step (KillOnBadExit)
+	signal(SIGALRM, SIG_DFL);
+	sigset_t alrm;
+	sigemptyset(&alrm);
+	sigaddset(&alrm, SIGALRM);
+	pthread_sigmask(SIG_UNBLOCK, &alrm, NULL);
+	alarm(10);
+
 	MPI_Abort( world_comm_, EXIT_FAILURE);
+
+	// MPI_Abort should not return; if it does, leave without running destructors
+	_exit(EXIT_FAILURE);
 }
 
 void Parallel2d::abortRequest()
@@ -366,7 +388,7 @@ void Parallel2d::abortRequest()
 	{
 		failure=char(1);
 		broadcast(failure, root_);
-		exit(EXIT_FAILURE);
+		abortForce();
 	}
 	else
 	{

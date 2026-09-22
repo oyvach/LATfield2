@@ -8,6 +8,9 @@
  */
 
 #include <cstdlib>
+#include <cstdio>
+#include <signal.h>
+#include <unistd.h>
 #include <cmath>
 #include <iostream>
 #include <iomanip>
