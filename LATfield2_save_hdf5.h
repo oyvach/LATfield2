@@ -22,9 +22,16 @@ extern "C"{
      for(int i = 0;i<filename_str.size();i++)filename[i]=filename_str[i];
      filename[filename_str.size()] = '\0';
 
-	   char  dataset_name[128];
-	   for(int i = 0;i<filename_str.size();i++)dataset_name[i]=dataset_name_str[i];
-	   dataset_name[dataset_name_str.size()] = '\0';
+	//    char  dataset_name[128];
+	//    for(int i = 0;i<filename_str.size();i++)dataset_name[i]=dataset_name_str[i];
+	char  dataset_name[512];
+	if (dataset_name_str.size() >= sizeof(dataset_name))
+	{
+		cerr << "save_hdf5_externC: dataset name too long: " << dataset_name_str << endl;
+		return -1;
+	}
+	for(int i = 0;i<dataset_name_str.size();i++)dataset_name[i]=dataset_name_str[i];
+	dataset_name[dataset_name_str.size()] = '\0';
 
 	   herr_t status;
 

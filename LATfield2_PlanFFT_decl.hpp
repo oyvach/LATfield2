@@ -50,12 +50,18 @@ const char* cufftGetErrorString(cufftResult status) {
         case CUFFT_INVALID_SIZE:           return "CUFFT_INVALID_SIZE";
         case CUFFT_UNALIGNED_DATA:         return "CUFFT_UNALIGNED_DATA";
 #if (CUDART_VERSION >= 6050)
+#if (CUDART_VERSION < 13000)
         case CUFFT_INCOMPLETE_PARAMETER_LIST: return "CUFFT_INCOMPLETE_PARAMETER_LIST";
+#endif
         case CUFFT_INVALID_DEVICE:         return "CUFFT_INVALID_DEVICE";
+#if (CUDART_VERSION < 13000)
         case CUFFT_PARSE_ERROR:            return "CUFFT_PARSE_ERROR";
+#endif
         case CUFFT_NO_WORKSPACE:           return "CUFFT_NO_WORKSPACE";
         case CUFFT_NOT_IMPLEMENTED:        return "CUFFT_NOT_IMPLEMENTED";
+#if (CUDART_VERSION < 13000)
         case CUFFT_LICENSE_ERROR:          return "CUFFT_LICENSE_ERROR";
+#endif
 #endif
         default:                           return "Unknown CUFFT error";
     }
