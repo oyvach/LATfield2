@@ -53,7 +53,14 @@ inline void perfParticlesThrowOnCudaError(cudaError_t status, const char * conte
 {
     if (status != cudaSuccess)
     {
-        std::cerr << context << " failed: " << cudaGetErrorString(status) << std::endl;
+        // CUB maps a failing cudaGetDevice() (e.g. after an earlier kernel fault left a
+        // sticky error in the context) to cudaErrorInvalidDevice; report the pending
+        // context error too, so the original fault is not masked.
+        const cudaError_t pending = cudaPeekAtLastError();
+        std::cerr << context << " failed: " << cudaGetErrorString(status);
+        if (pending != cudaSuccess && pending != status)
+            std::cerr << " (pending CUDA context error: " << cudaGetErrorString(pending) << ")";
+        std::cerr << std::endl;
         throw std::runtime_error(context);
     }
 }
@@ -231,6 +238,18 @@ __global__ void update_pointers(perfParticles<part, part_info> * pcl, unsigned l
 
 template <typename part, typename part_info>
 __global__ void compute_rows(perfParticles<part, part_info> * pcl, uint32_t * row, unsigned long long int starting_idx = 0, bool check_local = false);
+
+// first offending particle found by check_particle_domain
+struct perfParticlesDomainViolation
+{
+    unsigned long long int count;
+    unsigned long long int first_idx;
+    double pos[3];
+    uint32_t row;
+};
+
+template <typename part, typename part_info>
+__global__ void check_particle_domain(perfParticles<part, part_info> * pcl, perfParticlesDomainViolation * violation);
 
 __global__ void initialize_indices(unsigned long long int * indices, unsigned long long int num_particles);
 
@@ -464,6 +483,7 @@ class perfParticles
 
         // helper function to prepare communication
         void prepareComm(unsigned long long int * send_begin, uint32_t ** d_keys, void ** d_temp, bool * d_temp_private, cudaStream_t & stream);
+        void checkParticleDomain(cudaStream_t & stream, const char * context);
 
         // helper function for sorting particles
         void computeSortIndices(uint32_t * d_keys, unsigned long long int * d_indices, void ** d_temp, bool * d_temp_private, cudaStream_t & stream);
@@ -491,6 +511,9 @@ class perfParticles
 
         template <typename part2, typename part_info2>
         friend __global__ void compute_rows(perfParticles<part2, part_info2> * pcl, uint32_t * row, unsigned long long int starting_idx, bool check_local);
+
+        template <typename part2, typename part_info2>
+        friend __global__ void check_particle_domain(perfParticles<part2, part_info2> * pcl, perfParticlesDomainViolation * violation);
 
         template <typename part2, typename part_info2, typename UpdateFunct>
         friend __global__ void update_particles(perfParticles<part2, part_info2> * pcl, UpdateFunct update_funct, double dtau, Field<Real> ** fields, int nfields, double * params, double * output, int * reduce_type, int noutput, Real * v2, bool copyout, void ** vparams);
@@ -849,6 +872,42 @@ __global__ void compute_rows(perfParticles<part, part_info> * pcl, uint32_t * ro
     }
 }
 
+// kernel to flag particles that are not finite, outside [0, boxSize), or not owned by this rank
+template <typename part, typename part_info>
+__global__ void check_particle_domain(perfParticles<part, part_info> * pcl, perfParticlesDomainViolation * violation)
+{
+    unsigned long long int idx =
+        static_cast<unsigned long long int>(blockIdx.x) * static_cast<unsigned long long int>(blockDim.x) +
+        static_cast<unsigned long long int>(threadIdx.x);
+
+    if (idx < pcl->num_particles_)
+    {
+        const Real * pos = pcl->p + 3*idx;
+        bool bad = false;
+
+        for (int i = 0; i < 3; i++)
+        {
+            if (!isfinite(pos[i]) || pos[i] < 0 || pos[i] >= pcl->boxSize_[i])
+                bad = true;
+        }
+
+        // computeRow is only meaningful for finite, wrapped positions
+        uint32_t r = bad ? pcl->num_row_buffers_ : static_cast<uint32_t>(pcl->computeRow(pos[1], pos[2]));
+
+        if (bad || r >= pcl->num_row_buffers_)
+        {
+            if (atomicAdd(&violation->count, 1ULL) == 0)
+            {
+                violation->first_idx = idx;
+                violation->pos[0] = pos[0];
+                violation->pos[1] = pos[1];
+                violation->pos[2] = pos[2];
+                violation->row = r;
+            }
+        }
+    }
+}
+
 __global__ void initialize_indices(unsigned long long int * indices, unsigned long long int num_particles)
 {
 #ifdef PINT64
@@ -1093,6 +1152,50 @@ void perfParticles<part, part_info>::releaseTemporaryWorkspace(void ** d_temp, b
     }
     *d_temp = nullptr;
     *d_temp_private = false;
+}
+
+// check that every particle has a finite position in [0, boxSize) owned by this rank;
+// abort cleanly otherwise, before out-of-domain rows corrupt device memory
+template <typename part, typename part_info>
+void perfParticles<part, part_info>::checkParticleDomain(cudaStream_t & stream, const char * context)
+{
+    if (num_particles_ == 0)
+        return;
+
+    perfParticlesDomainViolation * d_violation = nullptr;
+    perfParticlesDomainViolation h_violation;
+
+    auto success = cudaMallocAsync((void **) &d_violation, sizeof(perfParticlesDomainViolation), stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA malloc failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error in CUDA malloc for d_violation in checkParticleDomain");
+    }
+
+    cudaMemsetAsync(d_violation, 0, sizeof(perfParticlesDomainViolation), stream);
+    check_particle_domain<<<(num_particles_+127)/128, 128, 0, stream>>>(this, d_violation);
+    cudaMemcpyAsync(&h_violation, d_violation, sizeof(perfParticlesDomainViolation), cudaMemcpyDeviceToHost, stream);
+    cudaFreeAsync(d_violation, stream);
+
+    success = cudaStreamSynchronize(stream);
+    if (success != cudaSuccess)
+    {
+        std::cerr << "CUDA kernel failed: " << cudaGetErrorString(success) << std::endl;
+        throw std::runtime_error("Error after cudaStreamSynchronize in checkParticleDomain");
+    }
+
+    if (h_violation.count > 0)
+    {
+        std::cerr << " proc#" << parallel.rank() << " " << context << ": " << h_violation.count
+                  << " of " << num_particles_ << " particles outside the valid domain after migration"
+                  << " (first: local index " << h_violation.first_idx
+                  << ", pos = " << h_violation.pos[0] << " " << h_violation.pos[1] << " " << h_violation.pos[2]
+                  << ", row " << h_violation.row << " of " << num_row_buffers_ << " local rows)." << std::endl
+                  << " Positions must be finite, in [0, boxSize) and owned by this rank; a particle moving more than"
+                  << " one domain width per step cannot be migrated. This usually means the run went numerically"
+                  << " unstable or the time step is too large." << std::endl;
+        throw std::runtime_error("particle outside valid domain in perfParticles::checkParticleDomain");
+    }
 }
 
 // prepare communication
@@ -2288,7 +2391,10 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         uint64_t final_particle_count = num_particles_ + dim1_final_capacity + dim0_final_capacity;
         if (final_particle_count > total_capacity_)
         {
-            resizeGlobalBuffers(final_particle_count + extra_capacity_);
+            // MPI sends/receives directly from p/q/other on this path and keeps freed copies pinned on the GPU, //FIX: memory overflow
+            // so grow by at least 25% to reallocate rarely (a gaining rank otherwise reallocates every few steps) //FIX: memory overflow
+            // resizeGlobalBuffers(final_particle_count + extra_capacity_); //FIX: memory overflow (original line, disabled)
+            resizeGlobalBuffers(std::max(final_particle_count + extra_capacity_, total_capacity_ + total_capacity_ / 4)); //FIX: memory overflow
         }
 
         auto particle_buffer_bytes = [](uint64_t capacity) -> size_t
@@ -2533,11 +2639,11 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
             {
                 if (proc == 4 || proc % 2)
                 {
-                    extra_buffer_[proc].resizeManaged(extra_buffer_[proc].count + extra_capacity_);
+                    extra_buffer_[proc].resize(extra_buffer_[proc].count + extra_capacity_, managed_runtime_); //FIX: memory overflow -- match how extra_buffer_ was allocated (malloc unless managed)
                 }
                 else
                 {
-                    extra_buffer_[proc].resizeManaged(extra_buffer_[proc].count + (extra_capacity_ / 4));
+                    extra_buffer_[proc].resize(extra_buffer_[proc].count + (extra_capacity_ / 4), managed_runtime_); //FIX: memory overflow -- match how extra_buffer_ was allocated (malloc unless managed)
                 }
             }
 
@@ -2593,7 +2699,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[1].count + buffer_sizes[0] > extra_buffer_[1].capacity)
             {
-                extra_buffer_[1].resizeManaged(extra_buffer_[1].count + buffer_sizes[0] + extra_capacity_);
+                extra_buffer_[1].resize(extra_buffer_[1].count + buffer_sizes[0] + extra_capacity_, managed_runtime_); //FIX: memory overflow -- match how extra_buffer_ was allocated (malloc unless managed)
             }
             
             parallel.receive_dim1(extra_buffer_[1].p+3*extra_buffer_[1].count, 3*buffer_sizes[0], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
@@ -2605,7 +2711,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {        
             if (extra_buffer_[4].count + buffer_sizes[1] > extra_buffer_[4].capacity)
             {
-                extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[1] + extra_capacity_);
+                extra_buffer_[4].resize(extra_buffer_[4].count + buffer_sizes[1] + extra_capacity_, managed_runtime_); //FIX: memory overflow -- match how extra_buffer_ was allocated (malloc unless managed)
             }
 
             parallel.receive_dim1(extra_buffer_[4].p, 3*buffer_sizes[1], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
@@ -2617,7 +2723,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[7].count + buffer_sizes[2] > extra_buffer_[7].capacity)
             {
-                extra_buffer_[7].resizeManaged(extra_buffer_[7].count + buffer_sizes[2] + extra_capacity_);
+                extra_buffer_[7].resize(extra_buffer_[7].count + buffer_sizes[2] + extra_capacity_, managed_runtime_); //FIX: memory overflow -- match how extra_buffer_ was allocated (malloc unless managed)
             }
             
             parallel.receive_dim1(extra_buffer_[7].p+3*extra_buffer_[7].count, 3*buffer_sizes[2], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
@@ -2662,7 +2768,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[1].count + buffer_sizes[0] > extra_buffer_[1].capacity)
             {
-                extra_buffer_[1].resizeManaged(extra_buffer_[1].count + buffer_sizes[0] + extra_capacity_);
+                extra_buffer_[1].resize(extra_buffer_[1].count + buffer_sizes[0] + extra_capacity_, managed_runtime_); //FIX: memory overflow -- match how extra_buffer_ was allocated (malloc unless managed)
             }
             
             parallel.receive_dim1(extra_buffer_[1].p+3*extra_buffer_[1].count, 3*buffer_sizes[0], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
@@ -2674,7 +2780,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[4].count + buffer_sizes[1] > extra_buffer_[4].capacity)
             {
-                extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[1] + extra_capacity_);
+                extra_buffer_[4].resize(extra_buffer_[4].count + buffer_sizes[1] + extra_capacity_, managed_runtime_); //FIX: memory overflow -- match how extra_buffer_ was allocated (malloc unless managed)
             }
             
             parallel.receive_dim1(extra_buffer_[4].p+3*extra_buffer_[4].count, 3*buffer_sizes[1], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
@@ -2686,7 +2792,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[7].count + buffer_sizes[2] > extra_buffer_[7].capacity)
             {
-                extra_buffer_[7].resizeManaged(extra_buffer_[7].count + buffer_sizes[2] + extra_capacity_);
+                extra_buffer_[7].resize(extra_buffer_[7].count + buffer_sizes[2] + extra_capacity_, managed_runtime_); //FIX: memory overflow -- match how extra_buffer_ was allocated (malloc unless managed)
             }
             
             parallel.receive_dim1(extra_buffer_[7].p+3*extra_buffer_[7].count, 3*buffer_sizes[2], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
@@ -2731,7 +2837,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[1].count + buffer_sizes[0] > extra_buffer_[1].capacity)
             {
-                extra_buffer_[1].resizeManaged(extra_buffer_[1].count + buffer_sizes[0] + extra_capacity_);
+                extra_buffer_[1].resize(extra_buffer_[1].count + buffer_sizes[0] + extra_capacity_, managed_runtime_); //FIX: memory overflow -- match how extra_buffer_ was allocated (malloc unless managed)
             }
             
             parallel.receive_dim1(extra_buffer_[1].p+3*extra_buffer_[1].count, 3*buffer_sizes[0], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
@@ -2743,7 +2849,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[4].count + buffer_sizes[1] > extra_buffer_[4].capacity)
             {
-                extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[1] + extra_capacity_);
+                extra_buffer_[4].resize(extra_buffer_[4].count + buffer_sizes[1] + extra_capacity_, managed_runtime_); //FIX: memory overflow -- match how extra_buffer_ was allocated (malloc unless managed)
             }
             
             parallel.receive_dim1(extra_buffer_[4].p+3*extra_buffer_[4].count, 3*buffer_sizes[1], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
@@ -2755,7 +2861,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[7].count + buffer_sizes[2] > extra_buffer_[7].capacity)
             {
-                extra_buffer_[7].resizeManaged(extra_buffer_[7].count + buffer_sizes[2] + extra_capacity_);
+                extra_buffer_[7].resize(extra_buffer_[7].count + buffer_sizes[2] + extra_capacity_, managed_runtime_); //FIX: memory overflow -- match how extra_buffer_ was allocated (malloc unless managed)
             }
             
             parallel.receive_dim1(extra_buffer_[7].p+3*extra_buffer_[7].count, 3*buffer_sizes[2], (parallel.grid_rank()[1]+1) % parallel.grid_size()[1]);
@@ -2800,7 +2906,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[1].count + buffer_sizes[0] > extra_buffer_[1].capacity)
             {
-                extra_buffer_[1].resizeManaged(extra_buffer_[1].count + buffer_sizes[0] + extra_capacity_);
+                extra_buffer_[1].resize(extra_buffer_[1].count + buffer_sizes[0] + extra_capacity_, managed_runtime_); //FIX: memory overflow -- match how extra_buffer_ was allocated (malloc unless managed)
             }
             
             parallel.receive_dim1(extra_buffer_[1].p+3*extra_buffer_[1].count, 3*buffer_sizes[0], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
@@ -2812,7 +2918,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[4].count + buffer_sizes[1] > extra_buffer_[4].capacity)
             {
-                extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[1] + extra_capacity_);
+                extra_buffer_[4].resize(extra_buffer_[4].count + buffer_sizes[1] + extra_capacity_, managed_runtime_); //FIX: memory overflow -- match how extra_buffer_ was allocated (malloc unless managed)
             }
             
             parallel.receive_dim1(extra_buffer_[4].p+3*extra_buffer_[4].count, 3*buffer_sizes[1], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
@@ -2824,7 +2930,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[7].count + buffer_sizes[2] > extra_buffer_[7].capacity)
             {
-                extra_buffer_[7].resizeManaged(extra_buffer_[7].count + buffer_sizes[2] + extra_capacity_);
+                extra_buffer_[7].resize(extra_buffer_[7].count + buffer_sizes[2] + extra_capacity_, managed_runtime_); //FIX: memory overflow -- match how extra_buffer_ was allocated (malloc unless managed)
             }
             
             parallel.receive_dim1(extra_buffer_[7].p+3*extra_buffer_[7].count, 3*buffer_sizes[2], (parallel.grid_rank()[1]+parallel.grid_size()[1]-1) % parallel.grid_size()[1]);
@@ -2861,7 +2967,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[4].count + buffer_sizes[0] > extra_buffer_[4].capacity)
             {
-                extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[0] + extra_capacity_);
+                extra_buffer_[4].resize(extra_buffer_[4].count + buffer_sizes[0] + extra_capacity_, managed_runtime_); //FIX: memory overflow -- match how extra_buffer_ was allocated (malloc unless managed)
             }
             
             parallel.receive_dim0(extra_buffer_[4].p+3*extra_buffer_[4].count, 3*buffer_sizes[0], (parallel.grid_rank()[0]+parallel.grid_size()[0]-1) % parallel.grid_size()[0]);
@@ -2893,7 +2999,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[4].count + buffer_sizes[0] > extra_buffer_[4].capacity)
             {
-                extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[0] + extra_capacity_);
+                extra_buffer_[4].resize(extra_buffer_[4].count + buffer_sizes[0] + extra_capacity_, managed_runtime_); //FIX: memory overflow -- match how extra_buffer_ was allocated (malloc unless managed)
             }
             
             parallel.receive_dim0(extra_buffer_[4].p+3*extra_buffer_[4].count, 3*buffer_sizes[0], (parallel.grid_rank()[0]+1) % parallel.grid_size()[0]);
@@ -2925,7 +3031,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[4].count + buffer_sizes[0] > extra_buffer_[4].capacity)
             {
-                extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[0] + extra_capacity_);
+                extra_buffer_[4].resize(extra_buffer_[4].count + buffer_sizes[0] + extra_capacity_, managed_runtime_); //FIX: memory overflow -- match how extra_buffer_ was allocated (malloc unless managed)
             }
             
             parallel.receive_dim0(extra_buffer_[4].p+3*extra_buffer_[4].count, 3*buffer_sizes[0], (parallel.grid_rank()[0]+1) % parallel.grid_size()[0]);
@@ -2957,7 +3063,7 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         {
             if (extra_buffer_[4].count + buffer_sizes[0] > extra_buffer_[4].capacity)
             {
-                extra_buffer_[4].resizeManaged(extra_buffer_[4].count + buffer_sizes[0] + extra_capacity_);
+                extra_buffer_[4].resize(extra_buffer_[4].count + buffer_sizes[0] + extra_capacity_, managed_runtime_); //FIX: memory overflow -- match how extra_buffer_ was allocated (malloc unless managed)
             }
             
             parallel.receive_dim0(extra_buffer_[4].p+3*extra_buffer_[4].count, 3*buffer_sizes[0], (parallel.grid_rank()[0]+parallel.grid_size()[0]-1) % parallel.grid_size()[0]);
@@ -3005,6 +3111,15 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
 
     nvtxRangePop();
 
+    nvtxRangePushA("moveParticles: check particle domain");
+#ifndef DEBUG_RADIX_SORT
+    checkParticleDomain(pcl_stream, "moveParticles");
+#else
+    cudaStream_t default_stream = 0;
+    checkParticleDomain(default_stream, "moveParticles");
+#endif
+    nvtxRangePop();
+
 #ifdef DEBUG_RADIX_SORT
     nvtxRangePushA("moveParticles: update row buffers");
 
@@ -3021,6 +3136,8 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
         success = cudaMallocAsync((void **) &d_keys, num_particles_ * sizeof(uint32_t), pcl_stream);
         if (success != cudaSuccess)
         {
+            std::cerr << " proc#" << parallel.rank() << " CUDA malloc (d_keys) failed in moveParticles: " << cudaGetErrorString(success) //FIX: memory overflow
+                      << " (num_particles=" << num_particles_ << ")" << std::endl; //FIX: memory overflow
             throw std::runtime_error("CUDA malloc failed in moveParticles");
         }
 
@@ -3044,6 +3161,8 @@ void perfParticles<part, part_info>::moveParticles(UpdateFunct move_funct, doubl
     success = cudaMallocAsync((void **) &d_indices_in, num_particles_ * sizeof(unsigned long long) * 2L, pcl_stream);
     if (success != cudaSuccess)
     {
+        std::cerr << " proc#" << parallel.rank() << " CUDA malloc (d_indices_in) failed in moveParticles: " << cudaGetErrorString(success) //FIX: memory overflow
+                  << " (num_particles=" << num_particles_ << ")" << std::endl; //FIX: memory overflow
         throw std::runtime_error("CUDA malloc failed in moveParticles");
     }
 

@@ -2451,6 +2451,7 @@ void  Field<FieldType>::saveSliceHDF5(string filename, string dataset_name,int x
         {
             for(int l=0;l<dim;l++)r[l]=sX.coord(l);
             r[0]+=xcoord;
+            r[0]=((r[0]%this->lattice_->size(0))+this->lattice_->size(0))%this->lattice_->size(0); // periodic wrap
 
             X.setCoord(r);
 
@@ -2469,7 +2470,7 @@ void  Field<FieldType>::saveSliceHDF5(string filename, string dataset_name,int x
 			for(sX.first();sX.test();sX.next())
 			{
 					for(int l=1;l<dim;l++)r[l]=sX.coord(l-1);
-					r[0]=xcoord;
+					r[0]=((xcoord%this->lattice_->size(0))+this->lattice_->size(0))%this->lattice_->size(0); // periodic wrap
 					X.setCoord(r);
 					for(int i =0; i<components_;i++)sfield(sX,i)=this->operator()(X,i);
 			}
@@ -2563,7 +2564,7 @@ void Field<FieldType>::saveSliceHDF5_coarseGrain2D(string filename, string datas
 		index += ((localsize[1] + (2 * halo)) * ratio - localsize[1]) * (localsize[0] + (2 * halo));
 	}
 
-	sfield.saveSliceHDF5(filename, dataset_name, xcoord, thickness);
+	sfield.saveSliceHDF5(filename, dataset_name, xcoord / ratio, thickness); // xcoord is in fine-lattice units
 	sfield.dealloc();
 #else
 	COUT << "LATfield2d must be compiled with HDF5 (flag HDF5 turn on!!)" << endl;

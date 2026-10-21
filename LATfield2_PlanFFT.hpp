@@ -193,6 +193,10 @@ int temporaryMemFFT::reserveDeviceComplexCapacity(size_t capacity, const char* c
 		}
 	}
 
+	// allocate with 25% headroom so slow step-to-step growth (e.g. particle clustering) does not reallocate //FIX: memory overflow
+	// on every call; keep the factor below 100/(100-FREETEMPPERCENT), or the per-cycle shrink in main undoes it //FIX: memory overflow
+	capacity += capacity / 4; //FIX: memory overflow
+
 	size_t old_bytes = deviceWorkspaceBytes();
 	size_t new_bytes = 3 * capacity * deviceComplexBytes();
 
@@ -306,7 +310,8 @@ void temporaryMemFFT::clear()
 #endif
 //////////////////////Temp memory///////////////////////////
 
-temporaryMemFFT tempMemory(true); // NB: now using managed memory!! experimental
+// temporaryMemFFT tempMemory(true); // NB: now using managed memory!! experimental //FIX: memory overflow (original line, disabled)
+temporaryMemFFT tempMemory(false); //FIX: memory overflow -- test: plain device memory instead of managed for the shared workspace
 
 
 
